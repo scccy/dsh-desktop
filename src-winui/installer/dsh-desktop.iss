@@ -16,6 +16,7 @@
   #define AppVersion "0.1.0"
 #endif
 
+
 #define AppName "dsh desktop"
 #define AppPublisher "dsh desktop"
 #define AppExe "dsh-desktop-winui.exe"
@@ -34,8 +35,9 @@ VersionInfoVersion={#AppVersion}
 DefaultDirName={autopf}\dsh desktop
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
-UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayIcon={app}\app\{#AppExe}
 OutputDir={#RepoRoot}\dist
+InfoAfterFile={#RepoRoot}\src-winui\installer\after-install.txt
 OutputBaseFilename=dsh-desktop-winui-setup-{#AppVersion}
 SetupIconFile={#RepoRoot}\src-tauri\icons\icon.ico
 Compression=lzma2/max
@@ -60,17 +62,23 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb,*.exe.WebView2\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Everything the app needs lives under {app}\app so the install folder root stays
+; readable: uninstaller, shortcuts target, this note. The publish output is a flat
+; pile of ~280 files, so it is never unpacked next to the uninstaller.
+Source: "{#PublishDir}\*"; DestDir: "{app}\app"; Excludes: "*.pdb,*.exe.WebView2\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The same note the wizard shows, left on disk so the folder explains itself:
+; where the app is, where the data lives, and how to uninstall.
+Source: "{#RepoRoot}\src-winui\installer\after-install.txt"; DestDir: "{app}"; DestName: "安装说明.txt"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{group}\{#AppName}"; Filename: "{app}\app\{#AppExe}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\app\{#AppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\app\{#AppExe}"; WorkingDir: "{app}\app"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Only files this installer created are removed. The per-user data directory is
 ; left alone: it holds the WebView2 profile, rolling logs and config.toml.
-Type: filesandordirs; Name: "{app}\dsh-desktop-winui.exe.WebView2"
+Type: filesandordirs; Name: "{app}\app\dsh-desktop-winui.exe.WebView2"

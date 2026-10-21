@@ -82,7 +82,18 @@ if (-not (Test-Path (Join-Path $publish "dsh_ffi.dll"))) {
     throw "the publish output at $publish does not contain dsh_ffi.dll; run without -SkipRust"
 }
 
-Write-Host "`n[3/3] Inno Setup" -ForegroundColor Cyan
+# Keep only the languages the shell actually shows. The publish output carries a
+# folder per culture for WinAppSDK's native resources (87 of them), and all but
+# three are dead weight. This is done on disk rather than through Inno's
+# `Excludes`, because that option matches file names only — every culture holds
+# the same file names (Microsoft.ui.xaml.dll.mui), so name matching cannot tell
+# zh-CN from af-ZA. WinUI falls back to en-us for anything missing.
+$keepCultures = @("en-us", "zh-CN", "zh-TW", "Microsoft.UI.Xaml")
+$dropped = Get-ChildItem $publish -Directory | Where-Object { $keepCultures -notcontains $_.Name }
+foreach ($folder in $dropped) { Remove-Item -Recurse -Force $folder.FullName }
+$pruned = Get-ChildItem $publish -Recurse -File | Measure-Object -Property Length -Sum
+Write-Host ("`n[3/3] Inno Setup (dropped {0} culture folders; payload now {1:N1} MB / {2} files)" -f $dropped.Count, ($pruned.Sum / 1MB), $pruned.Count) -ForegroundColor Cyan
+
 $iscc = Find-Iscc
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 & $iscc "/DAppVersion=$version" $iss

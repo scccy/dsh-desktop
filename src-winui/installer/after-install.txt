@@ -1,0 +1,34 @@
+dsh desktop 0.1.0 — Windows 原生壳
+==================================
+
+装了什么
+--------
+  app\            应用程序本体（自包含，不需要另装 .NET 或 Windows App Runtime）
+  unins000.exe    卸载程序
+  unins000.dat    卸载用的安装清单
+
+用哪个
+------
+  开始菜单「dsh desktop」，或直接运行 app\dsh-desktop-winui.exe
+
+前置条件
+--------
+  · Windows 10 1809 及以上（WebView2 运行时随 Edge 自带）；
+  · 机器上已装 Node 与 dsh（npm i -g @deepseek-ai/dsh）；
+  · 壳不自带、也不升级这些运行时。
+
+你的数据在哪
+------------
+  %LOCALAPPDATA%\dsh desktop\
+    webview2\     WebView2 配置
+    logs\         滚动日志与崩溃报告（应用 → 打开日志目录）
+    config.toml   配置（profile、端口、窗口行为）
+
+怎么卸载
+--------
+  设置 → 应用 → dsh desktop → 卸载
+  或 开始菜单 → dsh desktop → Uninstall dsh desktop
+  或 直接运行 D:\soft\dsh-desktop\unins000.exe
+
+  卸载只删程序文件；上面那个 %LOCALAPPDATA%\dsh desktop 目录会保留
+  （里面有你的日志和配置）。要彻底清干净，卸载后手动删除该目录。

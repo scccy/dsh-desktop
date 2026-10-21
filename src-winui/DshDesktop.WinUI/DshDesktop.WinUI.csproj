@@ -29,6 +29,10 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
     <EnableMsixTooling>false</EnableMsixTooling>
+    <!-- Only ship satellite resources for the languages this shell actually shows.
+         Without this the publish carries 87 culture folders (af-ZA, am-ET, ...),
+         which is ~180 files of dead weight in every install. -->
+    <SatelliteResourceLanguages>zh-Hans;zh-Hant;en</SatelliteResourceLanguages>
     <PublishTrimmed>true</PublishTrimmed>
     <!-- Partial: framework assemblies are trimmed, this app assembly is kept
          whole. Full trimming would need `DynamicDependency` annotations on every
