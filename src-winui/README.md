@@ -41,13 +41,19 @@ dotnet publish src-winui/DshDesktop.WinUI/DshDesktop.WinUI.csproj `
 - 拖拽面只绑定菜单右侧的空白条（`DragRegion`），菜单本身不受影响；双击该条最大化由框架处理；
 - Windows 10 上若不支持标题栏定制，整行折叠、退回系统标题栏。
 
-菜单项全部是壳的动作（打开设置 / 重试连接 / 打开日志目录 / 退出 / 刷新页面 / 关于），
+菜单项全部是壳的动作（打开设置 / 重试连接 / 打开日志目录 / 检查 dsh 更新 / 退出 / 刷新页面 / 关于），
 **没有一项来自或作用于 dsh 页面内部**——壳不向页面注入任何脚本，那条 chrome 也就不该
 长得像 dsh 网页自己的菜单。
 
 官方 Electron 客户端那条「应用 / 编辑」是**网页自己画的**（`titleBarStyle: hidden` +
 `titleBarOverlay{height:40}` + preload 注入 `data-windows-titlebar`），我们不冒充它：
 `scripts/scan-asar.ps1` 可以把官方 `app.asar` 里的相关实现原样扫出来核对。
+
+## 检查 dsh 更新
+应用 → 检查 dsh 更新…：经桥接调 `dsh_check_update`，跑 `npm view @deepseek-ai/dsh version`
+（30 s 兜底），由 `dsh_lite_core::update` 判定"有新版本 / 已是最新"并弹原生对话框。
+**只报告，不安装**：升级命令只展示与复制，真正的升级仍由用户自己的包管理器完成。
+本表与 Tauri 壳的菜单项共用同一份判定逻辑，不会有第二种"什么算更新"的定义。
 
 ## 实测（Windows 11 build 26300，本机）
 

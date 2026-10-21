@@ -6,6 +6,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.Graphics;
 
@@ -30,6 +31,7 @@ public sealed partial class MainWindow : Window
     private UIElement? _beforeSettings;
 
     private string _lastUrl = string.Empty;
+    private string? _latestDshVersion;
     private ShellDiagnostics _diagnostics = new();
 
     public MainWindow()
@@ -46,6 +48,7 @@ public sealed partial class MainWindow : Window
         // factory has to be qualified by its type name.
         _bridge = new DshBridge(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         _bridge.StateChanged += OnStateChanged;
+        _bridge.UpdateChecked += OnUpdateChecked;
 
         RootGrid.Loaded += OnLoaded;
         Closed += OnClosed;
@@ -296,13 +299,13 @@ public sealed partial class MainWindow : Window
 
         _beforeSettings = ScreenHost.Content as UIElement;
         ScreenHost.Content = _settings;
-        _settings.Show(_diagnostics);
+        _settings.Show(_diagnostics, _latestDshVersion);
 
         // Refresh in the background so a slow probe cannot freeze the page.
         _diagnostics = await Task.Run(_bridge.Diagnose);
         if (ReferenceEquals(ScreenHost.Content, _settings))
         {
-            _settings.Show(_diagnostics);
+            _settings.Show(_diagnostics, _latestDshVersion);
         }
     }
 
@@ -337,7 +340,111 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnMenuAbout(object sender, RoutedEventArgs e)
+    private void OnMenuAbout(object sender, RoutedEventArgs e) => ShowAboutDialog();
+
+    private void OnMenuCheckUpdate(object sender, RoutedEventArgs e) => CheckForUpdate();
+
+    /// <summary>
+    /// Asks the core for the published dsh version. The shell never installs
+    /// anything: the verdict is a dialog plus a copyable upgrade command.
+    /// </summary>
+    private void CheckForUpdate()
+    {
+        var rejection = _bridge.CheckUpdate();
+        if (rejection is not null)
+        {
+            Report(ScreenHost.Content, rejection);
+        }
+    }
+
+    private async void OnUpdateChecked(UpdateState update)
+    {
+        switch (update.State)
+        {
+            case "checking":
+                Report(ScreenHost.Content, "正在检查 dsh 更新…");
+                return;
+
+            case "available":
+                _latestDshVersion = update.Latest;
+                Report(ScreenHost.Content, string.Empty);
+                await ShowUpdateDialogAsync(
+                    "有新版本可用",
+                    $"已安装 dsh {update.Installed ?? "未知"}，最新发布 {update.Latest}。",
+                    update.UpgradeCommand);
+                return;
+
+            case "current":
+                _latestDshVersion = update.Latest;
+                Report(ScreenHost.Content, string.Empty);
+                await ShowUpdateDialogAsync(
+                    "已是最新版本",
+                    $"已安装 dsh {update.Installed ?? "未知"}，npm 上的最新发布是 {update.Latest}。",
+                    null);
+                return;
+
+            default:
+                Report(ScreenHost.Content, string.Empty);
+                await ShowUpdateDialogAsync(
+                    "检查更新失败",
+                    update.Detail ?? "npm view 没有返回可用的版本号。",
+                    null);
+                return;
+        }
+    }
+
+    private async Task ShowUpdateDialogAsync(string title, string body, string? command)
+    {
+        var content = string.IsNullOrWhiteSpace(command)
+            ? body
+            : $"{body}{Environment.NewLine}{Environment.NewLine}升级命令：{command}";
+        var dialog = new ContentDialog
+        {
+            XamlRoot = RootGrid.XamlRoot,
+            Title = title,
+            Content = content,
+            CloseButtonText = "关闭",
+            PrimaryButtonText = command is null ? null : "复制升级命令",
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary && command is not null)
+        {
+            CopyToClipboard(command);
+        }
+    }
+
+    private static void CopyToClipboard(string text)
+    {
+        try
+        {
+            var package = new DataPackage();
+            package.SetText(text);
+            Clipboard.SetContent(package);
+        }
+        catch (Exception)
+        {
+            // Clipboard access can fail when another process holds it; the
+            // command stays visible in the dialog either way.
+        }
+    }
+
+    /// <summary>Writes a one-line note onto whichever screen is showing.</summary>
+    private static void Report(object? screen, string text)
+    {
+        switch (screen)
+        {
+            case ErrorView error:
+                error.Report(text);
+                break;
+            case LoadingView:
+            case null:
+                break;
+        }
+    }
+
+    private async void ShowAboutDialog()
     {
         var dsh = _diagnostics.DshVersion is null
             ? "未找到 dsh"

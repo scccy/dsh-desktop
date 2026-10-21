@@ -33,17 +33,27 @@
 //! {"kind":"state","state":"ready","url":"http://127.0.0.1:PORT/?token=…","pid":4321}
 //! {"kind":"state","state":"failed","error":"dsh-not-found","detail":"…"}
 //! {"kind":"state","state":"stopped"}
+//! {"kind":"update","state":"checking"}
+//! {"kind":"update","state":"available","installed":"0.2.1","latest":"0.3.0","upgradeCommand":"…"}
+//! {"kind":"update","state":"current","installed":"0.3.0","latest":"0.3.0"}
+//! {"kind":"update","state":"failed","detail":"npm view exited with code 1"}
 //! ```
 //!
 //! `error` is one of `dsh-not-found`, `version`, `spawn`, `ready`, `auth`,
 //! `internal` — the same vocabulary the Tauri shell's error page uses.
+//!
+//! # ABI 2
+//!
+//! Version 2 adds [`dsh_check_update`] and the `update` event kind. A shell built
+//! against ABI 1 keeps working with a version-2 library only if it never needs
+//! update checking; the C# shell refuses a mismatch outright.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dsh_lite_core::config::{self, CloseAction, Config, LogLevel};
@@ -54,7 +64,7 @@ use dsh_lite_core::url_policy;
 use serde::Deserialize;
 
 /// Version of this ABI. A shell must refuse to run against a different value.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Successful return code of every fallible entry point.
 pub const OK: c_int = 0;
@@ -70,6 +80,9 @@ pub const ERR_SYSTEM: c_int = 3;
 
 /// Deadline for the short `dsh --version` / `node --version` probes.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deadline for the `npm view` probe behind an update check.
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `CreateProcess` flag that keeps a console window from flashing on screen.
 #[cfg(windows)]
@@ -681,6 +694,125 @@ pub extern "C" fn dsh_open_logs() -> c_int {
             ERR_SYSTEM
         }
     }
+}
+
+/// Set while an update probe runs, so a second click cannot start a second npm.
+static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// How `npm` has to be started on this platform.
+///
+/// Windows installs `npm` as a command shim that `CreateProcess` cannot start
+/// directly, so it goes through `cmd.exe /c`.
+fn npm_command() -> (PathBuf, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            PathBuf::from("cmd.exe"),
+            vec!["/c".to_owned(), "npm".to_owned()],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (PathBuf::from("npm"), Vec::new())
+    }
+}
+
+fn emit_update(state: &str, extra: serde_json::Value) {
+    let mut payload = serde_json::json!({ "kind": "update", "state": state });
+    if let (Some(target), Some(source)) = (payload.as_object_mut(), extra.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    emit("update", &payload);
+}
+
+fn emit_update_failure(detail: &str) {
+    let detail = url_policy::redact_text(detail);
+    record(&format!("update check failed: {detail}"));
+    emit_update("failed", serde_json::json!({ "detail": detail }));
+}
+
+/// Runs the `npm view` probe and reports the verdict through the event sink.
+fn run_update_check() {
+    let config = load_config();
+    let inputs = locate_inputs(&StartOptions::default(), &config);
+    let installed = dsh_locate::locate(&inputs)
+        .ok()
+        .and_then(|command| probe_dsh_version(&command));
+
+    let (program, prefix) = npm_command();
+    let args = vec![
+        "view".to_owned(),
+        dsh_lite_core::update::PACKAGE.to_owned(),
+        "version".to_owned(),
+    ];
+
+    record(&format!("checking {} with npm view", dsh_lite_core::update::PACKAGE));
+    match run_capture(&program, &prefix, &args, UPDATE_TIMEOUT) {
+        Ok(capture) => {
+            // npm prints warnings on stdout, so the verdict comes from the
+            // shared interpreter rather than from this crate.
+            match dsh_lite_core::update::interpret(
+                &capture.stdout,
+                capture.code,
+                installed.as_deref(),
+            ) {
+                Ok(outcome) => {
+                    record(&format!(
+                        "published dsh is {} (installed {})",
+                        outcome.latest,
+                        outcome.installed.as_deref().unwrap_or("unknown")
+                    ));
+                    emit_update(
+                        if outcome.newer { "available" } else { "current" },
+                        serde_json::json!({
+                            "latest": outcome.latest,
+                            "installed": outcome.installed,
+                            "newer": outcome.newer,
+                            "upgradeCommand": dsh_lite_core::update::UPGRADE_COMMAND,
+                        }),
+                    );
+                }
+                Err(error) => emit_update_failure(&error.to_string()),
+            }
+        }
+        Err(error) => emit_update_failure(&error),
+    }
+}
+
+/// Asks npm for the published `dsh` version and reports it without installing.
+///
+/// Returns [`OK`] when the probe is accepted (`checking` → `available` /
+/// `current` / `failed` events follow) and [`ERR_STATE`] when one is already
+/// running. Nothing is ever installed or upgraded by the shell.
+#[unsafe(no_mangle)]
+pub extern "C" fn dsh_check_update() -> c_int {
+    if UPDATE_RUNNING.swap(true, Ordering::SeqCst) {
+        set_last_error("an update check is already running");
+        return ERR_STATE;
+    }
+
+    match SHELL.lock() {
+        Ok(mut shell) => {
+            if shell.logger.is_none() {
+                shell.logger = logger();
+            }
+        }
+        Err(poisoned) => {
+            let mut shell = poisoned.into_inner();
+            if shell.logger.is_none() {
+                shell.logger = logger();
+            }
+        }
+    }
+
+    emit_update("checking", serde_json::json!({}));
+    std::thread::spawn(|| {
+        run_update_check();
+        UPDATE_RUNNING.store(false, Ordering::SeqCst);
+    });
+    OK
 }
 
 /// Defaults the report falls back to when the configuration file is missing, so

@@ -35,6 +35,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock Grid.Row="0" Style="{StaticResource ShellCaption}" Text="壳版本" />
@@ -63,6 +64,9 @@
 
                 <TextBlock Grid.Row="8" Style="{StaticResource ShellCaption}" Text="配置文件" />
                 <TextBlock Grid.Row="8" Grid.Column="1" x:Name="ConfigPathText" Text="—" TextWrapping="Wrap" />
+
+                <TextBlock Grid.Row="9" Style="{StaticResource ShellCaption}" Text="npm 最新版本" />
+                <TextBlock Grid.Row="9" Grid.Column="1" x:Name="LatestVersionText" Text="—（应用 → 检查 dsh 更新）" />
             </Grid>
 
             <StackPanel

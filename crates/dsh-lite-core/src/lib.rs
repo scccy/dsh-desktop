@@ -11,6 +11,7 @@ pub mod dsh_locate;
 pub mod env_probe;
 pub mod launcher;
 pub mod logging;
+pub mod update;
 pub mod url_policy;
 
 /// Shell name used in diagnostics, log lines and the window title.

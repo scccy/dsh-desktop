@@ -44,9 +44,21 @@ internal static class Methods
     [DllImport(Library, ExactSpelling = true)]
     internal static extern int dsh_open_logs();
 
+    [DllImport(Library, ExactSpelling = true)]
+    internal static extern int dsh_check_update();
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void EventCallback(IntPtr kind, IntPtr payload, IntPtr user);
 }
+
+/// <summary>One update-check event pushed by the Rust core.</summary>
+public sealed record UpdateState(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("latest")] string? Latest = null,
+    [property: JsonPropertyName("installed")] string? Installed = null,
+    [property: JsonPropertyName("newer")] bool Newer = false,
+    [property: JsonPropertyName("upgradeCommand")] string? UpgradeCommand = null,
+    [property: JsonPropertyName("detail")] string? Detail = null);
 
 /// <summary>One state event pushed by the Rust core.</summary>
 public sealed record ShellState(
@@ -100,6 +112,7 @@ public sealed record StartOptions
 [JsonSerializable(typeof(ShellState))]
 [JsonSerializable(typeof(ShellDiagnostics))]
 [JsonSerializable(typeof(StartOptions))]
+[JsonSerializable(typeof(UpdateState))]
 internal sealed partial class ShellJsonContext : JsonSerializerContext;
 
 /// <summary>
@@ -110,7 +123,7 @@ internal sealed partial class ShellJsonContext : JsonSerializerContext;
 public sealed class DshBridge : IDisposable
 {
     /// <summary>The ABI this C# code was written against.</summary>
-    public const uint ExpectedAbiVersion = 1;
+    public const uint ExpectedAbiVersion = 2;
 
     // Rooted for the lifetime of the process: the native side keeps the raw
     // function pointer, so the delegate must not be collectible.
@@ -126,6 +139,9 @@ public sealed class DshBridge : IDisposable
 
     /// <summary>Raised on the UI thread for every state event.</summary>
     public event Action<ShellState>? StateChanged;
+
+    /// <summary>Raised on the UI thread for every update-check event.</summary>
+    public event Action<UpdateState>? UpdateChecked;
 
     /// <summary>
     /// Installs the event sink and verifies that the loaded library speaks the
@@ -202,6 +218,17 @@ public sealed class DshBridge : IDisposable
     /// <summary>Opens the log directory in Explorer.</summary>
     public void OpenLogs() => Methods.dsh_open_logs();
 
+    /// <summary>
+    /// Asks npm for the published <c>dsh</c> version. Returns <c>null</c> when the
+    /// probe was accepted (the verdict arrives through <see cref="UpdateChecked"/>),
+    /// or the core's error text when one is already running.
+    /// </summary>
+    public string? CheckUpdate()
+    {
+        var code = Methods.dsh_check_update();
+        return code == 0 ? null : TakeLastError() ?? $"dsh_check_update failed with code {code}";
+    }
+
     /// <summary>Pulls and clears the core's last error text.</summary>
     private static string? TakeLastError()
     {
@@ -227,6 +254,29 @@ public sealed class DshBridge : IDisposable
         var json = payload == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(payload);
         if (string.IsNullOrEmpty(json))
         {
+            return;
+        }
+
+        // `kind` is the discriminator; today the payload also carries it, so a
+        // reader that only has the payload still routes correctly.
+        var eventKind = kind == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(kind);
+        if (string.Equals(eventKind, "update", StringComparison.Ordinal))
+        {
+            UpdateState? update;
+            try
+            {
+                update = JsonSerializer.Deserialize(json, ShellJsonContext.Default.UpdateState);
+            }
+            catch (JsonException)
+            {
+                return;
+            }
+
+            if (update is not null)
+            {
+                _dispatcher.TryEnqueue(() => UpdateChecked?.Invoke(update));
+            }
+
             return;
         }
 

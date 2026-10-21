@@ -54,7 +54,7 @@ function VisibleMenuItems {
 }
 
 $cases = @(
-    @{ Menu = "应用"; Expect = @("打开设置…", "重试连接", "打开日志目录", "退出") },
+    @{ Menu = "应用"; Expect = @("打开设置…", "重试连接", "打开日志目录", "检查 dsh 更新…", "退出") },
     @{ Menu = "视图"; Expect = @("刷新页面", "关于 dsh desktop") }
 )
 

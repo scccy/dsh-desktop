@@ -48,6 +48,7 @@
                         </MenuFlyoutItem.KeyboardAccelerators>
                     </MenuFlyoutItem>
                     <MenuFlyoutItem Click="OnMenuOpenLogs" Text="打开日志目录" />
+                    <MenuFlyoutItem Click="OnMenuCheckUpdate" Text="检查 dsh 更新…" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Click="OnMenuQuit" Text="退出">
                         <MenuFlyoutItem.KeyboardAccelerators>

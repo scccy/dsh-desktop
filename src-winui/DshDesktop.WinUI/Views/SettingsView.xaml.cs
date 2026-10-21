@@ -20,8 +20,11 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
     }
 
-    /// <summary>Renders a diagnostics report.</summary>
-    public void Show(ShellDiagnostics? diagnostics)
+    /// <summary>
+    /// Renders a diagnostics report. <paramref name="latestVersion"/> is the
+    /// published dsh version from the last update check, when one has run.
+    /// </summary>
+    public void Show(ShellDiagnostics? diagnostics, string? latestVersion = null)
     {
         if (diagnostics is null)
         {
@@ -37,6 +40,7 @@ public sealed partial class SettingsView : UserControl
                 ? $"{diagnostics.DshVersion}（不受支持）"
                 : diagnostics.DshVersion;
         NodeVersionText.Text = Or(diagnostics.NodeVersion);
+        LatestVersionText.Text = Or(latestVersion);
         ProfileText.Text = Or(diagnostics.Profile);
         PortText.Text = diagnostics.ConfiguredPort.ToString();
         LogDirText.Text = Or(diagnostics.LogDir);

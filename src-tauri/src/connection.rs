@@ -730,23 +730,9 @@ pub fn helper_output(
 
 /// Whether `latest` is a newer release than `installed`.
 ///
-/// Both are version strings; an unreadable pair is never "newer", so a prompt
-/// is only shown when the comparison is certain.
-pub fn update_is_newer(latest: &str, installed: &str) -> bool {
-    let (Some(latest), Some(installed)) = (version_triple(latest), version_triple(installed))
-    else {
-        return false;
-    };
-    latest > installed
-}
-
-/// Release triple of a version string, ignoring pre-release and build suffixes.
-fn version_triple(raw: &str) -> Option<(u64, u64, u64)> {
-    let parsed = parse_version(raw)?;
-    let core = parsed.split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
-    Some((parts.next()??, parts.next()??, parts.next()??))
-}
+/// Delegates to `dsh_lite_core::update` so the Tauri shell and the WinUI shell
+/// cannot drift on what counts as an update.
+pub use dsh_lite_core::update::update_is_newer;
 
 #[cfg(test)]
 mod tests {
