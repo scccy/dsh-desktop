@@ -70,7 +70,7 @@ if (-not $SkipRust) {
 
 if (-not $SkipPublish) {
     $dotnet = Find-DotNet
-    Write-Host "`n[2/3] dotnet publish (self-contained, trimmed)" -ForegroundColor Cyan
+    Write-Host "`n[2/3] dotnet publish (self-contained, no trimming)" -ForegroundColor Cyan
     if (Test-Path $publish) { Remove-Item -Recurse -Force $publish }
     & $dotnet publish $project -c $Configuration -r win-x64 --self-contained true -o $publish -v minimal
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }

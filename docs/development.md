@@ -131,6 +131,17 @@ pwsh -File scripts\build-installer.ps1        # Rust 桥 → dotnet publish → 
 - **构建末尾自带冒烟检查**：脚本会启动刚发布的 `dsh-desktop-winui.exe`，等窗口出现、再正常关闭；进程若在窗口出现前退出（`0xC000027B` 之类），脚本打印新写入的 `winui-crash.log` 片段、**删掉刚生成的安装包**并以退出码 1 结束 —— 不能启动的包不许留在 `dist\`。已有壳实例在跑时会跳过（单实例锁会让新进程立刻退出，否则会误判），需要强制跳过用 `-SkipSmokeTest`；
 - **不做裁剪**：`PublishTrimmed=false`。裁剪能把 156 MB 压到 71 MB，但会让 `.pri`、WebView2 的 WinRT 投影、`System.Threading.Thread` 这类"链接器看不见"的依赖在发布版里静默失效（Debug 正常、启动即 `0xC000027B`）。体积预算只要求"不要太大"，因此选择完整自包含输出 + 官方 API。完整记录见 [src-winui/README.md](../src-winui/README.md#为什么不做裁剪)。
 
+#### 一条命令更新本机安装
+
+```powershell
+pwsh -File scripts\redeploy.ps1
+# 关壳 -> 构建（含冒烟）-> 卸载 -> 安装 -> 校验 SHA-256 -> 启动
+```
+
+失败时脚本以非零退出码结束，并且**不会动已安装的旧版本**（卸载发生在构建成功之后）。
+`-InstallDir` 换安装位置，`-SkipBuild` 只做安装，`-NoLaunch` 装完不启动。
+脚本不会去杀不属于本项目的 `dsh` 进程，只把残留进程数量报出来。
+
 ### 4.5 macOS dmg（现状与缺口）
 
 两条线必须分清，不要互相代替：
