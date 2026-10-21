@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod console_text;
 pub mod dsh_locate;
 pub mod env_probe;
 pub mod launcher;

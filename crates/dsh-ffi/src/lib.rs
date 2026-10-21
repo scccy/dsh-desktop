@@ -297,18 +297,20 @@ fn run_capture(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
                 if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_string(&mut stdout);
+                    let _ = pipe.read_to_end(&mut stdout_bytes);
                 }
                 if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
+                    let _ = pipe.read_to_end(&mut stderr_bytes);
                 }
                 return Ok(Capture {
                     code: status.code().unwrap_or(-1),
-                    stdout,
-                    stderr,
+                    // `cmd.exe` and `npm` answer in the OEM code page, and
+                    // `read_to_string` would silently yield nothing for them.
+                    stdout: dsh_lite_core::console_text::decode(&stdout_bytes),
+                    stderr: dsh_lite_core::console_text::decode(&stderr_bytes),
                 });
             }
             Ok(None) => {}
@@ -748,7 +750,10 @@ fn run_update_check() {
         "version".to_owned(),
     ];
 
-    record(&format!("checking {} with npm view", dsh_lite_core::update::PACKAGE));
+    record(&format!(
+        "checking {} with npm view",
+        dsh_lite_core::update::PACKAGE
+    ));
     match run_capture(&program, &prefix, &args, UPDATE_TIMEOUT) {
         Ok(capture) => {
             // npm prints warnings on stdout, so the verdict comes from the
@@ -765,7 +770,11 @@ fn run_update_check() {
                         outcome.installed.as_deref().unwrap_or("unknown")
                     ));
                     emit_update(
-                        if outcome.newer { "available" } else { "current" },
+                        if outcome.newer {
+                            "available"
+                        } else {
+                            "current"
+                        },
                         serde_json::json!({
                             "latest": outcome.latest,
                             "installed": outcome.installed,

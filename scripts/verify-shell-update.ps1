@@ -19,6 +19,7 @@ Add-Type -MemberDefinition @'
 $process = Get-Process dsh-desktop-winui -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $process) { throw "the shell is not running" }
 $handle = $process.MainWindowHandle
+$shellPid = $process.Id
 
 [ShellUpdate.Native]::keybd_event(0x12, 0, 0, [IntPtr]::Zero)
 [ShellUpdate.Native]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
@@ -33,6 +34,11 @@ $appMenu = $root.FindFirst(
         [System.Windows.Automation.AutomationElement]::NameProperty, "应用")))
 if (-not $appMenu) { throw "the 应用 menu is missing" }
 
+# A menu left open by an earlier run would be toggled closed by this click.
+[ShellUpdate.Native]::keybd_event(0x1B, 0, 0, [IntPtr]::Zero)
+[ShellUpdate.Native]::keybd_event(0x1B, 0, 2, [IntPtr]::Zero)
+Start-Sleep -Milliseconds 400
+
 $rect = $appMenu.Current.BoundingRectangle
 [ShellUpdate.Native]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2)) | Out-Null
 Start-Sleep -Milliseconds 250
@@ -46,11 +52,16 @@ $checkItem = $root.FindFirst(
     (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty, "检查 dsh 更新…")))
 if (-not $checkItem) {
+    # The flyout can live in its own popup window, so look on the desktop but
+    # only accept items owned by the shell (the official client has menus too).
     $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $checkItem = $desktop.FindFirst(
+    $candidates = $desktop.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         (New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty, "检查 dsh 更新…")))
+    foreach ($candidate in $candidates) {
+        if ($candidate.Current.ProcessId -eq $shellPid) { $checkItem = $candidate; break }
+    }
 }
 if (-not $checkItem) { throw "the update menu item is missing" }
 

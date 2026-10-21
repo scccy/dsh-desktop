@@ -132,17 +132,26 @@ mod tests {
 
     #[test]
     fn a_failing_npm_is_reported_with_its_exit_code() {
-        assert_eq!(interpret("0.3.0", 1, Some("0.2.1")), Err(UpdateError::Failed(1)));
+        assert_eq!(
+            interpret("0.3.0", 1, Some("0.2.1")),
+            Err(UpdateError::Failed(1))
+        );
     }
 
     #[test]
     fn output_without_a_version_is_reported() {
-        assert_eq!(interpret("npm ERR! not found", 0, Some("0.2.1")), Err(UpdateError::NoVersion));
+        assert_eq!(
+            interpret("npm ERR! not found", 0, Some("0.2.1")),
+            Err(UpdateError::NoVersion)
+        );
     }
 
     #[test]
     fn the_display_strings_are_usable_in_a_dialog() {
-        assert_eq!(UpdateError::Failed(2).to_string(), "npm view exited with code 2");
+        assert_eq!(
+            UpdateError::Failed(2).to_string(),
+            "npm view exited with code 2"
+        );
         assert!(!UPGRADE_COMMAND.is_empty());
         assert_eq!(PACKAGE, "@deepseek-ai/dsh");
     }

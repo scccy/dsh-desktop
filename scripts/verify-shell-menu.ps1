@@ -11,6 +11,10 @@ param(
 # click. Screenshots cannot show that difference reliably and keyboard-only
 # tests report success, so this script drives a real left click and asserts on
 # the automation tree.
+#
+# Everything is filtered by process id: the official DeepSeek Harness client runs
+# the same page with the same menu names, and scanning the whole desktop picks up
+# its items ("编辑") as if they were ours.
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
 Add-Type -MemberDefinition @'
@@ -24,6 +28,7 @@ Add-Type -MemberDefinition @'
 $process = Get-Process dsh-desktop-winui -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $process) { throw "the shell is not running" }
 $handle = $process.MainWindowHandle
+$shellPid = $process.Id
 
 function Activate {
     [ShellMenu.Native]::keybd_event(0x12, 0, 0, [IntPtr]::Zero)
@@ -39,18 +44,46 @@ function Dismiss {
     Start-Sleep -Milliseconds 400
 }
 
+# Menu items of *this* process that are currently exposed, i.e. the open flyout.
 function VisibleMenuItems {
     $desktop = [System.Windows.Automation.AutomationElement]::RootElement
     $all = $desktop.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
     $names = @()
     foreach ($element in $all) {
         try {
+            if ($element.Current.ProcessId -ne $shellPid) { continue }
             if ($element.Current.ControlType -eq [System.Windows.Automation.ControlType]::MenuItem) {
                 $names += $element.Current.Name
             }
         } catch { }
     }
     $names | Where-Object { $_ } | Sort-Object -Unique
+}
+
+# The click must land on our own window; another app on top would "pass" silently.
+function ClickMenuBarItem($name) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    $item = $root.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $name)))
+    if (-not $item) { return $false }
+
+    $rect = $item.Current.BoundingRectangle
+    $x = [int]($rect.X + $rect.Width / 2)
+    $y = [int]($rect.Y + $rect.Height / 2)
+    $under = [System.Windows.Automation.AutomationElement]::FromPoint((New-Object System.Windows.Point($x, $y)))
+    if ($under -and $under.Current.ProcessId -ne $shellPid) {
+        throw "the point $x,$y belongs to process $($under.Current.ProcessId), not to the shell ($shellPid)"
+    }
+
+    [ShellMenu.Native]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 250
+    [ShellMenu.Native]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 90
+    [ShellMenu.Native]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Seconds 2
+    return $true
 }
 
 $cases = @(
@@ -62,22 +95,11 @@ $failures = 0
 foreach ($case in $cases) {
     Activate
     Dismiss
-
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-    $condition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $case.Menu)
-    $item = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-    if (-not $item) { "FAIL — menu '$($case.Menu)' is not in the automation tree"; $failures++; continue }
-
-    $rect = $item.Current.BoundingRectangle
-    $x = [int]($rect.X + $rect.Width / 2)
-    $y = [int]($rect.Y + $rect.Height / 2)
-    [ShellMenu.Native]::SetCursorPos($x, $y) | Out-Null
-    Start-Sleep -Milliseconds 250
-    [ShellMenu.Native]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 90
-    [ShellMenu.Native]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-    Start-Sleep -Seconds 2
+    if (-not (ClickMenuBarItem $case.Menu)) {
+        "FAIL — menu '$($case.Menu)' is not in the automation tree"
+        $failures++
+        continue
+    }
 
     $visible = VisibleMenuItems
     $missing = $case.Expect | Where-Object { $visible -notcontains $_ }
@@ -89,20 +111,11 @@ foreach ($case in $cases) {
     }
 }
 
-# Leave one menu open for a screenshot, so the artefact matches a passing run.
+# Leave the 应用 menu open for a screenshot, so the artefact matches a passing run.
 Activate
 Dismiss
-$root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-$condition = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::NameProperty, "应用")
-$item = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-$rect = $item.Current.BoundingRectangle
-[ShellMenu.Native]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2)) | Out-Null
-Start-Sleep -Milliseconds 250
-[ShellMenu.Native]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
-Start-Sleep -Milliseconds 90
-[ShellMenu.Native]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-Start-Sleep -Seconds 1
+$null = ClickMenuBarItem "应用"
+Start-Sleep -Milliseconds 500
 
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $screen = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)

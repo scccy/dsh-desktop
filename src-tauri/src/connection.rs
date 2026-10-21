@@ -659,7 +659,12 @@ fn run_capture(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = fs::read_to_string(&path).unwrap_or_default();
+                // `npm`/`cmd.exe` answer in the OEM code page on Windows, and
+                // `read_to_string` would turn every non-UTF-8 byte into an
+                // empty capture. Decode tolerantly instead.
+                let output = fs::read(&path)
+                    .map(|bytes| dsh_lite_core::console_text::decode(&bytes))
+                    .unwrap_or_default();
                 let _ = fs::remove_file(&path);
                 return Ok(Capture {
                     code: status.code().unwrap_or(-1),

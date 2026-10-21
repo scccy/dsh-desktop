@@ -294,7 +294,7 @@ fn drain_stdout(stdout: std::process::ChildStdout, tail: SharedTail, lines: mpsc
                     push_tail(&tail, &buffer);
                     // A closed receiver means readiness was reached; keep
                     // draining so the child never blocks on a full pipe.
-                    let _ = lines.send(String::from_utf8_lossy(&buffer).into_owned());
+                    let _ = lines.send(crate::console_text::decode(&buffer));
                 }
                 Err(_) => return,
             }
@@ -334,7 +334,9 @@ fn push_tail(tail: &SharedTail, bytes: &[u8]) {
 
 fn tail_text(tail: &SharedTail) -> String {
     match tail.lock() {
-        Ok(bytes) => url_policy::redact_text(&String::from_utf8_lossy(&bytes)),
+        // `cmd.exe` writes its own diagnostics in the OEM code page, so the tail
+        // is decoded tolerantly instead of being assumed to be UTF-8.
+        Ok(bytes) => url_policy::redact_text(&crate::console_text::decode(&bytes)),
         Err(_) => String::new(),
     }
 }
