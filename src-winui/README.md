@@ -38,7 +38,7 @@ pwsh -File ..\scripts\build-installer.ps1
 
 Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + **桌面快捷方式（默认勾选）**、安装根目录提供 `启动 dsh desktop.lnk`、干净卸载；安装根目录只有 `app\` + `安装说明.txt` + 启动快捷方式 + 卸载器；
 用户数据（`%LOCALAPPDATA%\dsh desktop`）卸载时保留。实测：74.6 MB 发布目录 →
-**20.2 MB** 安装包（发布目录 71.3 MB / 114 文件，87 个 culture 目录已剪到 3 个）。未签名，SmartScreen 会提示未知发布者。
+**42.2 MB** 安装包（发布目录 156.6 MB / 314 文件，安装时只带 zh/en 三个 culture 目录）。未签名，SmartScreen 会提示未知发布者。
 详见 [docs/development.md §4.4](../docs/development.md#44-windows-安装包src-winuiinno-setup)。
 
 ## 标题栏
@@ -82,7 +82,8 @@ Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + **桌面快捷方�
 
 | 指标 | 数值 | 备注 |
 |---|---|---|
-| 发布体积 | **74.5 MB** / 280 个文件 | 未压缩、自包含、`PublishTrimmed=partial` |
+| 发布体积 | **156.6 MB** / 314 个文件 | 未压缩、自包含、**不做裁剪**（见下节） |
+| 安装包 | **42.2 MB** | lzma2 压缩，含图标 / 快捷方式 / 卸载器 |
 | 冷启动（进程 → 窗口可见） | **约 260–390 ms** | 首次启动 14 s，为系统文件缓存冷启动 |
 | 常驻内存 | 工作集约 141 MB / 私有约 80 MB | WebView2 起来之后 |
 | `dsh_ffi.dll` | 2.28 MB | 仅依赖系统 DLL（无 MinGW 运行库） |
@@ -92,41 +93,38 @@ Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + **桌面快捷方�
 对比：用 `Microsoft.WindowsAppSDK` 元包且不裁剪时是 **209 MB**（其中
 onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到）。
 
-## 五个必须知道的工程陷阱
+## 为什么不做裁剪
+
+裁剪（`PublishTrimmed`）能把发布体积从 156 MB 压到 71 MB，但代价是踩了三类坑，**全部只在裁剪后的发布版出现、Debug 一切正常、失败时连报错都没有**（进程以 `0xC000027B` 直接结束）：
+
+| 坑 | 现象 |
+|---|---|
+| `<assembly>.pri` | XAML 资源索引缺失，启动即 stowed exception，没有窗口 |
+| `Microsoft.Web.WebView2.Core.Projection` | 调 `CreateWithOptionsAsync` 时 `FileNotFoundException` |
+| `System.Threading.Thread` / `.ThreadPool` | 单实例监听线程一启动就 `FileNotFoundException` |
+
+产品的体积预算是"不要太大"，不是"尽可能小"，所以现在**关掉裁剪、按官方 API 写**，用 42 MB 的安装包换掉这一整类"只有发布版才炸"的问题。上面三条记录保留在这里，是为了下次有人想重新打开裁剪时先看代价。
+
+## 两个必须知道的工程陷阱
 
 1. **`dotnet publish` 会漏掉 `<assembly>.pri`。** 未打包 + 自包含的 WinUI 应用发布后
    缺资源索引，启动即 `0xC000027B`（stowed exception），**没有窗口、没有报错**。
-   `DshDesktop.WinUI.csproj` 里的 `CopyShellRuntimeExtrasToPublish` 显式补齐
-   `.pri` 与三个 WinAppSDK 文件；`dotnet build` 的输出没有这个问题，所以只跑
-   `build` 永远发现不了。
-2. **裁剪会拆掉反射式 JSON。** `System.Text.Json` 的默认重载依赖反射元数据，
-   在 `PublishTrimmed` 下 Debug 能跑、Release 会静默失配。这里用源生成的
-   `ShellJsonContext`（`JsonSourceGenerationMode.Metadata`）固定契约。
-3. **裁剪会删掉 WebView2 的 WinRT 投影。** 用 `CoreWebView2Environment.CreateWithOptionsAsync`
-   指定 profile 目录时，运行期会 `FileNotFoundException: Microsoft.Web.WebView2.Core.Projection`
-   ——该程序集在 `PublishTrimmed` 下被裁掉，`build` 与 Debug 都发现不了，只有裁剪后的发布版
-   一进 WebView2 就崩（`0xC000027B`，无任何提示）。改用文档化的环境变量
-   `WEBVIEW2_USER_DATA_FOLDER`（在 `App` 构造函数里设，早于任何 WebView2 创建），
-   不碰投影程序集。
-4. **裁剪会删掉线程相关的框架程序集。** 单实例监听用 `System.Threading.Thread` /
-   `EventWaitHandle`，`PublishTrimmed` 会把 `System.Threading.Thread`、
-   `System.Threading.ThreadPool` 这类"只在特定 API 后面才用得到"的 facade 裁掉；
-   Debug 正常、裁剪后的发布版一进 `OnLaunched` 就 `FileNotFoundException`，
-   进程随后以 `0xC000027B` 结束。工程文件里用 `TrimmerRootAssembly` 把
-   `System.Threading`、`System.Threading.Thread`、`System.Threading.ThreadPool`
-   钉住（合计 112 KB）。**同理别在 `App` 构造函数里 `Environment.Exit`**：
-   XAML 还没初始化完就退出，同样会以 stowed exception 收场。
-5. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
+   `DshDesktop.WinUI.csproj` 里的 `CopyShellPriToPublish` 显式补这一个文件；
+   `dotnet build` 的输出没有这个问题，所以只跑 `build` 永远发现不了。
+2. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
    展开，但鼠标点击落空"的假象——只做键盘自测会误判为正常。必须用
    `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)`
-   把品牌区与菜单声明为可交互区，矩形是物理像素、相对窗口左上，尺寸 / DPI /
-   最大化变化后重算。回归脚本用真实鼠标点击 + UI 自动化断言（不看截图）：
+   把菜单声明为可交互区，矩形是物理像素、相对窗口左上，尺寸 / DPI / 最大化变化后
+   重算。回归脚本用真实鼠标点击 + UI 自动化断言（不看截图）：
 
    ```powershell
    # 先启动壳，然后：
    .\scripts\verify-shell-menu.ps1
    ```
 
+还有一条与退出有关的**: 别在 `App` 构造函数里 `Environment.Exit`** —— XAML 尚未
+初始化完就退出，进程会以 stowed exception 结束；单实例的判断放构造函数、动作放
+`OnLaunched`。
 ## 当前缺口（如实）
 
 | 缺口 | 状态 |

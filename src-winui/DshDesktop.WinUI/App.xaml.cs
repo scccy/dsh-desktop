@@ -21,11 +21,6 @@ public partial class App : Application
         // process dies with a stowed exception instead of exiting cleanly.
         _isSecondary = !SingleInstance.Acquire();
 
-        // WebView2 defaults to a profile folder next to the executable, which
-        // fails when the shell is installed somewhere read-only. The documented
-        // environment variable moves it without touching the WinRT projection,
-        // which trimming strips from the published build.
-        Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", ShellPaths.WebViewDataFolder());
 
         // A stowed XAML exception kills the process with 0xC000027B and no
         // message at all. The core's log lives in Rust, which never sees these,

@@ -233,11 +233,11 @@ public sealed partial class MainWindow : Window
         ScreenHost.Content = _error;
     }
 
-    private void ShowBrowser(string url)
+    private async void ShowBrowser(string url)
     {
         try
         {
-            ShowBrowserCore(url);
+            await ShowBrowserCore(url);
         }
         catch (Exception error)
         {
@@ -248,17 +248,34 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void ShowBrowserCore(string url)
+    private async Task ShowBrowserCore(string url)
     {
         if (_browser is null)
         {
             _browser = new Microsoft.UI.Xaml.Controls.WebView2();
         }
 
-        // The profile folder is chosen in App's constructor through
-        // WEBVIEW2_USER_DATA_FOLDER: calling CreateWithOptionsAsync here would
-        // need Microsoft.Web.WebView2.Core.Projection, which the trimmed publish
-        // drops (FileNotFoundException at runtime).
+        // Create the environment explicitly so the profile lives under
+        // %LOCALAPPDATA% instead of next to the executable (which is read-only when
+        // the shell is installed machine-wide).
+        if (_browser.CoreWebView2 is null)
+        {
+            try
+            {
+                var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment
+                    .CreateWithOptionsAsync(
+                        browserExecutableFolder: null,
+                        userDataFolder: ShellPaths.WebViewDataFolder(),
+                        options: null);
+                await _browser.EnsureCoreWebView2Async(environment);
+            }
+            catch (Exception error)
+            {
+                ErrorLog.Write("browser-environment", error);
+                ShowError("internal", $"WebView2 初始化失败：{error.Message}");
+                return;
+            }
+        }
 
         if (!string.Equals(url, _lastUrl, StringComparison.Ordinal))
         {
