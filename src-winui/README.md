@@ -29,6 +29,23 @@ dotnet publish src-winui/DshDesktop.WinUI/DshDesktop.WinUI.csproj `
 `DshFfiDirectory` 默认指向 `target/release/`，换 profile 时用
 `-p:DshFfiDirectory=<dir>` 覆盖。
 
+## 标题栏
+
+壳自绘一条 40 DIP 标题栏行（`ExtendsContentIntoTitleBar`，见 ADR-004）：
+
+- 左侧：图标 + 产品名 + **壳自己的菜单**（应用 / 视图）；
+- 右侧：最小化 / 最大化 / 关闭仍由 Windows 绘制，主题与 Snap 布局悬浮菜单保持系统行为；
+- 拖拽面只绑定菜单右侧的空白条（`DragRegion`），菜单本身不受影响；双击该条最大化由框架处理；
+- Windows 10 上若不支持标题栏定制，整行折叠、退回系统标题栏。
+
+菜单项全部是壳的动作（打开设置 / 重试连接 / 打开日志目录 / 退出 / 刷新页面 / 关于），
+**没有一项来自或作用于 dsh 页面内部**——壳不向页面注入任何脚本，那条 chrome 也就不该
+长得像 dsh 网页自己的菜单。
+
+官方 Electron 客户端那条「应用 / 编辑」是**网页自己画的**（`titleBarStyle: hidden` +
+`titleBarOverlay{height:40}` + preload 注入 `data-windows-titlebar`），我们不冒充它：
+`scripts/scan-asar.ps1` 可以把官方 `app.asar` 里的相关实现原样扫出来核对。
+
 ## 实测（Windows 11 build 26300，本机）
 
 | 指标 | 数值 | 备注 |
@@ -43,7 +60,7 @@ dotnet publish src-winui/DshDesktop.WinUI/DshDesktop.WinUI.csproj `
 对比：用 `Microsoft.WindowsAppSDK` 元包且不裁剪时是 **209 MB**（其中
 onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到）。
 
-## 两个必须知道的工程陷阱
+## 三个必须知道的工程陷阱
 
 1. **`dotnet publish` 会漏掉 `<assembly>.pri`。** 未打包 + 自包含的 WinUI 应用发布后
    缺资源索引，启动即 `0xC000027B`（stowed exception），**没有窗口、没有报错**。
@@ -53,12 +70,22 @@ onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到�
 2. **裁剪会拆掉反射式 JSON。** `System.Text.Json` 的默认重载依赖反射元数据，
    在 `PublishTrimmed` 下 Debug 能跑、Release 会静默失配。这里用源生成的
    `ShellJsonContext`（`JsonSourceGenerationMode.Metadata`）固定契约。
+3. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
+   展开，但鼠标点击落空"的假象——只做键盘自测会误判为正常。必须用
+   `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)`
+   把品牌区与菜单声明为可交互区，矩形是物理像素、相对窗口左上，尺寸 / DPI /
+   最大化变化后重算。回归脚本用真实鼠标点击 + UI 自动化断言（不看截图）：
+
+   ```powershell
+   # 先启动壳，然后：
+   .\scripts\verify-shell-menu.ps1
+   ```
 
 ## 当前缺口（如实）
 
 | 缺口 | 状态 |
 |---|---|
-| 托盘图标、原生菜单、全局快捷键 | WinUI 壳尚未实现，仍在 Tauri 壳里 |
+| 托盘图标、全局快捷键 | WinUI 壳尚未实现，仍在 Tauri 壳里（标题栏菜单已实现，见上节） |
 | 单实例锁 | 未实现；多开会出现多个壳争用同一个 `dsh` |
 | 设置页写回 `config.toml` | 只读；`dsh_start` 的 `StartOptions` 已预留 profile / port |
 | profile 预检（`--dump-config`） | 未接；失败会落到 `ready` 错误页而不是 `profile` |
