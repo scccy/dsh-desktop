@@ -112,6 +112,36 @@ shasum -a 256 -c SHA256SUMS.txt  # macOS
 
 硬性规则：签名私钥、证书、密码只存在于仓库 secrets，**绝不提交到仓库**，也不写进日志或产物说明。
 
+### 4.4 Windows 安装包（`src-winui`，Inno Setup）
+
+```powershell
+pwsh -File scripts\build-installer.ps1        # Rust 桥 → dotnet publish → ISCC
+# 产出：dist\dsh-desktop-winui-setup-<version>.exe
+```
+
+- **实测**（2026-10-21）：`dotnet publish` 74.6 MB / 281 文件 → 安装包 **20.6 MB**（lzma2）；静默安装后落盘 78.8 MB / 283 文件（多出 `unins000.exe` 与 `.dat`）；安装 → 启动 → 卸载全流程验证通过，卸载后目录被清空；
+- 安装形态：per-user（`PrivilegesRequired=lowest`，**不弹 UAC**），默认装到 `%LOCALAPPDATA%\Programs\dsh desktop`，安装时可选 all-users；开始菜单快捷方式 + 可选桌面快捷方式；
+- 用户数据（`%LOCALAPPDATA%\dsh desktop`：WebView2 profile、滚动日志、`config.toml`）卸载时**故意保留**；
+- 版本号唯一来源是 `Cargo.toml` 的 `[workspace.package] version`，脚本读取后以 `/DAppVersion` 传给 ISCC，不在 `.iss` 里写死；
+- **未签名**：SmartScreen 会提示"未知发布者"。签名点位就在 ISCC 产物上（`signtool sign /fd sha256 /tr <时间戳> dist\dsh-desktop-winui-setup-*.exe`），证书到位后接进脚本即可，不影响今天的分发；
+- 本地 Rust 工具链是 MinGW（见 6.1）：产出的 `dsh_ffi.dll` 已用 `objdump -p` 确认**只依赖系统 DLL**（无 libgcc / winpthread），可以进安装包；正式发布仍建议在 CI 用 MSVC 重建一份。
+
+### 4.5 macOS dmg（现状与缺口）
+
+两条线必须分清，不要互相代替：
+
+| 线 | 状态 |
+|---|---|
+| Tauri 壳（`src-tauri`，三平台） | `release.yml` 已在 `macos-latest` 上执行 `--bundles dmg`，但**从未真正触发过**（仓库还没打过 tag），所以 dmg 目前只停留在配置层面，没有任何产物被验证 |
+| WinUI 原生壳（`src-winui`） | Windows 独有。mac 想要同样的原生形态，需要 SwiftUI + `dsh-ffi` 的 `staticlib`（ADR-003 预留的口子），并且**必须在一台 mac 上开发与验证** |
+
+mac 落地时的阻塞项：
+
+- **签名与公证**：需要 `Developer ID Application` 证书 + `notarytool`；没有证书只能 ad-hoc 签名，用户要右键 → 打开，且 Gatekeeper 会拦下双击；
+- 本机是 Windows，**构建不出也验证不了** macOS 产物，dmg 的一切结论只能在 mac 或 CI 上得出；
+- 目标机器同样需要自备 `dsh` 与 Node（与 Windows 一致），壳不打包运行时；
+- Tauri 壳的 dmg 与 WinUI 安装包在**观感上不是同一套 UI**（三屏 HTML vs 原生 Fluent），文档里不得混为一谈。
+
 ## 5. CI 与本地环境的差异
 
 - CI 的 Windows 用 runner 自带 MSVC；本地常见的是 MinGW（见 6.1）；

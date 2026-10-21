@@ -19,7 +19,8 @@
 | `src-tauri` 窗口壳（单实例、窗口、连接/生命周期、托盘、macOS 菜单、快捷键） | 已实现，本地 `cargo build -p dsh-desktop` 通过；运行时行为待真机验收 |
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
 | `src-ui/` 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
-| `src-winui/` Windows 原生壳（WinUI 3 + WebView2，三屏 + Mica） | 已跑通：定位 dsh → 启动 → 加载 Web GUI、错误屏、设置屏；托盘/菜单/单实例/设置写回**未接**（见 [src-winui/README.md](src-winui/README.md)） |
+| `src-winui/` Windows 原生壳（WinUI 3 + WebView2，三屏 + 自绘标题栏 + 检查更新） | 已跑通：定位 dsh → 启动 → 加载 Web GUI、错误屏、设置屏；托盘/单实例/设置写回**未接**（见 [src-winui/README.md](src-winui/README.md)） |
+| Windows 安装包（Inno Setup，`scripts/build-installer.ps1`） | 已产出 `dist/dsh-desktop-winui-setup-0.1.0.exe`（20.6 MB），安装→启动→卸载实测通过；**未签名** |
 | 占位图标（`assets/`、`src-tauri/icons/`） | 已就位（正式设计稿是发布阻塞项） |
 | 三平台 CI（fmt / clippy / test / release 构建） | 已就位（尚未包含 WinUI 壳的构建） |
 | 发布流水线（tag 触发、三平台打包、SHA-256、可选签名） | 已就位（签名未接线，见 [docs/development.md](docs/development.md)） |

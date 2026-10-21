@@ -29,6 +29,18 @@ dotnet publish src-winui/DshDesktop.WinUI/DshDesktop.WinUI.csproj `
 `DshFfiDirectory` 默认指向 `target/release/`，换 profile 时用
 `-p:DshFfiDirectory=<dir>` 覆盖。
 
+## 安装包
+
+```powershell
+pwsh -File ..\scripts\build-installer.ps1
+# 产出 dist\dsh-desktop-winui-setup-<version>.exe
+```
+
+Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + 可选桌面快捷方式、干净卸载；
+用户数据（`%LOCALAPPDATA%\dsh desktop`）卸载时保留。实测：74.6 MB 发布目录 →
+**20.6 MB** 安装包。未签名，SmartScreen 会提示未知发布者。
+详见 [docs/development.md §4.4](../docs/development.md#44-windows-安装包src-winuiinno-setup)。
+
 ## 标题栏
 
 壳自绘一条 40 DIP 标题栏行（`ExtendsContentIntoTitleBar`，见 ADR-004）：
