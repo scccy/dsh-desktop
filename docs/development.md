@@ -128,6 +128,7 @@ pwsh -File scripts\build-installer.ps1        # Rust 桥 → dotnet publish → 
 - 用户数据（`%LOCALAPPDATA%\dsh desktop`：WebView2 profile、滚动日志、`config.toml`）卸载时**故意保留**；
 - 版本号唯一来源是 `Cargo.toml` 的 `[workspace.package] version`，脚本读取后以 `/DAppVersion` 传给 ISCC，不在 `.iss` 里写死；
 - **未签名**：SmartScreen 会提示"未知发布者"。签名点位就在 ISCC 产物上（`signtool sign /fd sha256 /tr <时间戳> dist\dsh-desktop-winui-setup-*.exe`），证书到位后接进脚本即可，不影响今天的分发；
+- **构建末尾自带冒烟检查**：脚本会启动刚发布的 `dsh-desktop-winui.exe`，等窗口出现、再正常关闭；进程若在窗口出现前退出（`0xC000027B` 之类），脚本打印新写入的 `winui-crash.log` 片段、**删掉刚生成的安装包**并以退出码 1 结束 —— 不能启动的包不许留在 `dist\`。已有壳实例在跑时会跳过（单实例锁会让新进程立刻退出，否则会误判），需要强制跳过用 `-SkipSmokeTest`；
 - **不做裁剪**：`PublishTrimmed=false`。裁剪能把 156 MB 压到 71 MB，但会让 `.pri`、WebView2 的 WinRT 投影、`System.Threading.Thread` 这类"链接器看不见"的依赖在发布版里静默失效（Debug 正常、启动即 `0xC000027B`）。体积预算只要求"不要太大"，因此选择完整自包含输出 + 官方 API。完整记录见 [src-winui/README.md](../src-winui/README.md#为什么不做裁剪)。
 
 ### 4.5 macOS dmg（现状与缺口）

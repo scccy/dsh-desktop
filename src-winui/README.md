@@ -36,7 +36,7 @@ pwsh -File ..\scripts\build-installer.ps1
 # 产出 dist\dsh-desktop-winui-setup-<version>.exe
 ```
 
-Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + **桌面快捷方式（默认勾选）**、安装根目录提供 `启动 dsh desktop.lnk`、干净卸载；安装根目录只有 `app\` + `安装说明.txt` + 启动快捷方式 + 卸载器；
+构建脚本最后一步是**冒烟检查**：启动刚发布的 exe、等窗口、正常关闭；起不来就打印崩溃日志、删掉安装包并失败退出。Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + **桌面快捷方式（默认勾选）**、安装根目录提供 `启动 dsh desktop.lnk`、干净卸载；安装根目录只有 `app\` + `安装说明.txt` + 启动快捷方式 + 卸载器；
 用户数据（`%LOCALAPPDATA%\dsh desktop`）卸载时保留。实测：74.6 MB 发布目录 →
 **42.2 MB** 安装包（发布目录 156.6 MB / 314 文件，安装时只带 zh/en 三个 culture 目录）。未签名，SmartScreen 会提示未知发布者。
 详见 [docs/development.md §4.4](../docs/development.md#44-windows-安装包src-winuiinno-setup)。
