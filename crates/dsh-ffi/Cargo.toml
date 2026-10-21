@@ -1,0 +1,20 @@
+[package]
+name = "dsh-ffi"
+description = "C ABI over dsh-lite-core, for native shells that are not Tauri (WinUI, SwiftUI, gtk-rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dsh_ffi"
+# cdylib: P/Invoke from C#. staticlib: Swift on macOS later. rlib: unit tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+dsh-lite-core = { path = "../dsh-lite-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

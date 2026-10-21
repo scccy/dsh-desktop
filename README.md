@@ -3,26 +3,28 @@
 面向技术用户的轻量原生桌面外壳：**不自带任何运行时**，只负责启动并承载本机已有的 `dsh web`，并把宿主机真实的系统环境交给它。
 
 - 产品名：`dsh desktop` · 可执行文件 `dsh-desktop` · 包标识 `dev.dsh.desktop`
-- 语言 / 框架：Rust + Tauri v2（系统 WebView，无 Chromium、无 Node 构建链）
-- 平台：Windows · Linux · macOS，单一代码库
-- 目标体积：安装包 < 15 MB，冷启动 < 1.5s（不含 `dsh` 自身启动）
+- 语言 / 框架：Rust 核心 + 两条壳——Windows 用 **WinUI 3**（`src-winui/`），三平台通用壳用 **Tauri v2**（`src-tauri/`）；均为系统 WebView，无 Chromium、无 Node 构建链
+- 平台：Windows · Linux · macOS，单一 Rust 核心（`crates/dsh-lite-core`）
+- 体积：Tauri 壳目标 < 15 MB；WinUI 壳实测 74.5 MB（产品已明确接受 ~100 MB 以内）
 
 ## 状态（如实）
 
-**M0 骨架完成，M1 主链路代码已落地；尚未发布，也还没有可安装包，未在装有真实 `dsh` 的机器上完成端到端验收。**
+**M0 骨架完成，M1 主链路代码已落地；Windows 原生壳（WinUI 3）已在本机端到端跑通；尚未发布，也还没有可安装包。**
 
 | 部分 | 状态 |
 |---|---|
-| Cargo workspace（`crates/dsh-lite-core` + `src-tauri`） | 已建立 |
-| `dsh-lite-core`：配置、CLI、定位、环境探针、启动、URL 策略、日志 | 已实现并由 `cargo test` 覆盖 |
+| Cargo workspace（`crates/dsh-lite-core` + `crates/dsh-ffi` + `src-tauri`） | 已建立 |
+| `dsh-lite-core`：配置、CLI、定位、环境探针、启动、URL 策略、日志 | 已实现并由 `cargo test` 覆盖（91 项） |
+| `crates/dsh-ffi`：C ABI（`cdylib` + `staticlib`），供非 Tauri 壳复用核心 | 已实现并由 `cargo test` 覆盖（10 项） |
 | `src-tauri` 窗口壳（单实例、窗口、连接/生命周期、托盘、macOS 菜单、快捷键） | 已实现，本地 `cargo build -p dsh-desktop` 通过；运行时行为待真机验收 |
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
 | `src-ui/` 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
+| `src-winui/` Windows 原生壳（WinUI 3 + WebView2，三屏 + Mica） | 已跑通：定位 dsh → 启动 → 加载 Web GUI、错误屏、设置屏；托盘/菜单/单实例/设置写回**未接**（见 [src-winui/README.md](src-winui/README.md)） |
 | 占位图标（`assets/`、`src-tauri/icons/`） | 已就位（正式设计稿是发布阻塞项） |
-| 三平台 CI（fmt / clippy / test / release 构建） | 已就位 |
+| 三平台 CI（fmt / clippy / test / release 构建） | 已就位（尚未包含 WinUI 壳的构建） |
 | 发布流水线（tag 触发、三平台打包、SHA-256、可选签名） | 已就位（签名未接线，见 [docs/development.md](docs/development.md)） |
 
-窗口装饰使用系统原生标题栏，不做官方 Electron 那样自绘标题栏；这条取舍与"单一 Tauri 代码线"的完整理由见 [docs/architecture.md §6 关键决策](docs/architecture.md#6-关键决策adr)。
+窗口装饰使用系统原生标题栏，不做官方 Electron 那样自绘标题栏；"单一 Tauri 代码线"的原始理由见 [docs/architecture.md §6 ADR-002](docs/architecture.md#adr-002-单一-tauri-代码线不做-macos--windows-双原生壳)，Windows 侧改为原生壳的决策与实测代价见 [ADR-003](docs/architecture.md#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接)。
 
 ## 前置条件
 

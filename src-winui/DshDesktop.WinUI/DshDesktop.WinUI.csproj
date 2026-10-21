@@ -1,0 +1,90 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Windows native shell. It owns the window, the tray, menus and the three
+    screens the shell draws itself; every piece of logic it needs (config, dsh
+    discovery, launch lifecycle, URL policy, logging) comes from the Rust core
+    through `dsh_ffi.dll`, a plain C ABI. Nothing in here re-implements that
+    logic, and nothing in the Rust core knows this shell exists.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>DshDesktop.WinUI</RootNamespace>
+    <AssemblyName>dsh-desktop-winui</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Unpackaged, self-contained: no MSIX, no Windows App Runtime preinstall.
+         The trade is size, accepted deliberately (see docs/architecture.md). -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <PublishTrimmed>true</PublishTrimmed>
+    <!-- Partial: framework assemblies are trimmed, this app assembly is kept
+         whole. Full trimming would need `DynamicDependency` annotations on every
+         XAML-visible type; not worth the fragility for a shell this small. -->
+    <TrimMode>partial</TrimMode>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Symbols and the crash-dump helper are not shipped. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Where the Rust bridge puts its cdylib; override with
+         -p:DshFfiDirectory=... when building from a different profile. -->
+    <DshFfiDirectory Condition="'$(DshFfiDirectory)' == ''">$(MSBuildThisFileDirectory)..\..\target\release\</DshFfiDirectory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The split packages, not the `Microsoft.WindowsAppSDK` metapackage: the
+         metapackage also drags in the AI/ML/Search/Widgets payload, which is
+         ~38 MB of onnxruntime + DirectML this shell never loads. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="1.8.260803003" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4948" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(DshFfiDirectory)dsh_ffi.dll"
+          Link="dsh_ffi.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false"
+          Condition="Exists('$(DshFfiDirectory)dsh_ffi.dll')" />
+  </ItemGroup>
+
+  <Target Name="WarnWhenBridgeIsMissing" BeforeTargets="Build" Condition="!Exists('$(DshFfiDirectory)dsh_ffi.dll')">
+    <Warning Text="dsh_ffi.dll was not found in $(DshFfiDirectory); build it with 'cargo build -p dsh-ffi --release'." />
+  </Target>
+
+  <!--
+    `dotnet publish` for an unpackaged, self-contained WinUI app drops the app's
+    own resource index (`<assembly>.pri`) and two WinAppSDK runtime pieces that
+    the build output has. Without the `.pri`, XAML resource lookup fails at
+    startup with a stowed exception (0xC000027B) and no window ever appears, so
+    these are copied explicitly.
+  -->
+  <Target Name="CopyShellRuntimeExtrasToPublish" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <_ShellPublishExtra Include="$(TargetDir)$(TargetName).pri" Condition="Exists('$(TargetDir)$(TargetName).pri')" />
+      <_ShellPublishExtra Include="$(TargetDir)Microsoft.WindowsAppRuntime.Bootstrap.Net.dll" Condition="Exists('$(TargetDir)Microsoft.WindowsAppRuntime.Bootstrap.Net.dll')" />
+      <_ShellPublishExtra Include="$(TargetDir)Microsoft.Windows.ApplicationModel.WindowsAppRuntime.Projection.dll" Condition="Exists('$(TargetDir)Microsoft.Windows.ApplicationModel.WindowsAppRuntime.Projection.dll')" />
+      <_ShellPublishExtra Include="$(TargetDir)WindowsAppRuntime.DeploymentExtensions.OneCore.dll" Condition="Exists('$(TargetDir)WindowsAppRuntime.DeploymentExtensions.OneCore.dll')" />
+      <ResolvedFileToPublish Include="@(_ShellPublishExtra)" RelativePath="%(_ShellPublishExtra.Filename)%(_ShellPublishExtra.Extension)" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+</Project>

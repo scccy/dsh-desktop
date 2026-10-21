@@ -171,3 +171,56 @@ d  刷写日志、释放单实例锁、退出
 - 观感上限就是 Tauri + 系统 WebView 提供的能力：托盘、原生菜单、单实例、外链策略都有，定制标题栏没有（见 ADR-001）；
 - macOS 侧的验收只能靠 CI 构建通过 + 真机手测，文档里不得出现"已验证 macOS 行为"这类未发生的声明；
 - 退路不锁死：`crates/dsh-lite-core` 是零 GUI 依赖的纯 Rust 库，将来若某平台必须原生，可编成 `staticlib`（cbindgen → Swift）或 `cdylib`（P/Invoke → C#）复用，不需要重写逻辑。
+
+> **2026-10-21 状态变更**：本条在 **Windows 一侧**已被 [ADR-003](#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接) 取代，macOS / Linux 仍沿用本条（Tauri 单线）。取代的事实前提是产品明确接受"安装体积 ~75 MB"这一代价，而本条当初的核心否决理由（体积、双份维护）因此需要重新计价——重算结果见 ADR-003。
+
+### ADR-003 Windows 采用 WinUI 3 原生壳 + Rust C ABI 桥接
+
+**决策**：Windows 上新增 `src-winui/`（C# + WinUI 3）作为原生壳，逻辑不重写，通过 `crates/dsh-ffi` 的 C ABI 复用 `dsh-lite-core`。macOS / Linux 继续用 `src-tauri/`，直到各自被单独决策。
+
+**背景**：ADR-002 的否决前提是"安装包 < 15 MB"与"单线可维护"。产品随后明确：体积 100 MB 以内可接受，目标机器以 Windows 11 为主。前提变了，账就要重算——桥接把"逻辑复制两遍"变成"逻辑一份、绑定一层"，于是被否掉的主要代价里只剩体积与 UI 验收两条。
+
+**关键技术事实**（决定了为什么是桥接而不是重写）：
+
+| 事项 | 结论 |
+|---|---|
+| 逻辑复用 | `dsh-lite-core` 零 GUI 依赖，`cdylib` 可被 P/Invoke 直接消费；实测 `dsh_ffi.dll` 仅依赖系统 DLL，无 MinGW 运行库绑定 |
+| 纯 Rust 写 WinUI 3 | 不可行：XAML 的 `.xbf` 与 xaml typeinfo 由 msbuild / XamlCompiler 生成，没有 Rust 侧工具链 |
+| WinRT/COM 进程内组件 | 可行但样板更多，收益仅"接口长得像 WinRT"，否决 |
+| 独立进程 IPC（sidecar） | 可行且最适合跨语言，但当前只有两种壳，多一个进程的生命周期管理没有换到对应收益；保留为将来加第三种客户端时的选项 |
+
+**被否掉的替代方案与代价**：
+
+| 方案 | 代价 | 结论 |
+|---|---|---|
+| 继续只用 Tauri（即 ADR-002 原样） | 观感上限锁死在"系统 WebView + 系统标题栏" | 否掉：产品已明确要原生观感 |
+| 纯 Rust 直接写 WinUI 3 | 没有 XAML 编译工具链，实际不可行 | 否掉 |
+| Rust 逻辑进程 + C# UI 进程（IPC sidecar，ADR 里保留的方案） | 多一层协议与进程生命周期；当前只有两个消费者 | 暂缓：桥接先上，若将来需要第三种客户端再迁 |
+| 用 `Microsoft.WindowsAppSDK` 元包 | 带上 AI/ML/Search/Widgets，多 38 MB 死重量 | 否掉：改用 `Microsoft.WindowsAppSDK.WinUI` 拆分包 |
+
+**后果**：
+
+- **边界是一份契约**：`crates/dsh-ffi` 的 ABI 版本号（`ABI_VERSION = 1`）+ UTF-8 字符串所有权规则 + 错误码/错误串 + 异步事件回调；C# 侧校验版本不符即拒绝启动。新增能力必须改 ABI 并同时改两边，不允许单侧扩展；
+- **UI 侧只做粘合**：`src-winui` 里没有定位、没有启动、没有日志分片逻辑，`DshBridge` 只做 P/Invoke + JSON 事件 marshal 到 UI 线程；
+- **体积代价已可量化**：发布 74.5 MB / 280 文件（自包含、未压缩、partial trim），冷启动约 260–390 ms，常驻工作集约 141 MB。这组数字是接受本 ADR 的价码，不再是未知量；
+- **两条工程陷阱必须写进构建里**：`dotnet publish` 会漏 `<assembly>.pri`（启动即 stowed exception 且无报错）、裁剪会拆掉反射式 `System.Text.Json`（Debug 正常、Release 静默失配）。两者都已在工程文件里做了显式处理，见 `src-winui/README.md`；
+- **macOS / Linux 不受影响**：`crates/dsh-ffi` 同时产出 `staticlib`，将来上 Swift 时可复用同一份契约；
+- **两壳并存期的行为一致性靠契约和文档，不靠记忆**：错误分类词汇（`dsh-not-found` / `version` / `spawn` / `ready` / `auth` / `internal`）与三屏语义是共享契约，新增错误种类必须两边同时落地。
+
+## 7. 两条壳的落地对照
+
+| 能力 | `src-tauri`（三平台） | `src-winui`（Windows） |
+|---|---|---|
+| 三屏（加载 / 错误 / 设置） | 零构建 HTML/CSS | XAML + Fluent/Mica |
+| 逻辑来源 | 直接 `use dsh_lite_core` | `dsh-ffi` C ABI + JSON 事件 |
+| dsh 定位 / 版本探测 | 有 | 有（经桥接） |
+| 启动 `dsh web` / 就绪行解析 | 有 | 有（经桥接） |
+| 停止子进程无孤儿 | 有 | 有（经桥接，`dsh_stop`） |
+| 预检 profile / 登录 shell 探针 | 有 | **未接**（Windows 无需登录 shell 探针；预检待接） |
+| 托盘 / 原生菜单 / 快捷键 | 有 | **未接** |
+| 单实例锁 | 有 | **未接** |
+| 认证校验（终态 URL 断言） | 有 | **未做**（依赖 WebView2 跟随 302） |
+| 设置写回 `config.toml` | 有 | **只读** |
+| 打包 | Tauri bundler（msi/dmg/deb） | 未打包绿色目录 |
+
+上表的"未接"是当前真实状态，不是设计取舍的结论；两壳并存期内不得在文档或发布说明里声称 Windows 原生壳已达到 Tauri 壳的功能等价。

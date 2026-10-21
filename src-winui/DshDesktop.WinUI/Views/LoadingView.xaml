@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="DshDesktop.WinUI.Views.LoadingView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="40">
+        <StackPanel
+            MaxWidth="520"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="14">
+
+            <TextBlock
+                HorizontalAlignment="Center"
+                Style="{StaticResource ShellTitle}"
+                Text="dsh desktop" />
+
+            <ProgressRing
+                Width="28"
+                Height="28"
+                HorizontalAlignment="Center"
+                IsActive="True" />
+
+            <TextBlock
+                x:Name="StatusText"
+                HorizontalAlignment="Center"
+                Style="{StaticResource ShellBody}"
+                Text="正在启动 dsh…"
+                TextAlignment="Center" />
+
+            <TextBlock
+                Style="{StaticResource ShellCaption}"
+                Text="首次启动需要启动 dsh 并加载工作区，通常需要几秒到几十秒。"
+                TextAlignment="Center" />
+
+            <Button
+                x:Name="LogsButton"
+                Margin="0,8,0,0"
+                HorizontalAlignment="Center"
+                Click="OnOpenLogs"
+                Content="打开日志目录" />
+        </StackPanel>
+    </Grid>
+</UserControl>
