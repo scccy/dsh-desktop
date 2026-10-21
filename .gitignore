@@ -1,0 +1,34 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Tauri
+/src-tauri/target
+/src-tauri/gen/schemas
+/src-tauri/gen/android
+/src-tauri/gen/apple
+
+# 构建与打包产物
+/dist
+/bundle
+*.msi
+*.dmg
+*.deb
+*.AppImage
+
+# 本地配置与日志
+*.log
+!docs/**/*.log
+.env
+.env.*
+!.env.example
+/config.local.toml
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
