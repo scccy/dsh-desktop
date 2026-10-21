@@ -81,7 +81,7 @@ Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + 可选桌面快捷
 对比：用 `Microsoft.WindowsAppSDK` 元包且不裁剪时是 **209 MB**（其中
 onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到）。
 
-## 三个必须知道的工程陷阱
+## 四个必须知道的工程陷阱
 
 1. **`dotnet publish` 会漏掉 `<assembly>.pri`。** 未打包 + 自包含的 WinUI 应用发布后
    缺资源索引，启动即 `0xC000027B`（stowed exception），**没有窗口、没有报错**。
@@ -91,7 +91,13 @@ onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到�
 2. **裁剪会拆掉反射式 JSON。** `System.Text.Json` 的默认重载依赖反射元数据，
    在 `PublishTrimmed` 下 Debug 能跑、Release 会静默失配。这里用源生成的
    `ShellJsonContext`（`JsonSourceGenerationMode.Metadata`）固定契约。
-3. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
+3. **裁剪会删掉 WebView2 的 WinRT 投影。** 用 `CoreWebView2Environment.CreateWithOptionsAsync`
+   指定 profile 目录时，运行期会 `FileNotFoundException: Microsoft.Web.WebView2.Core.Projection`
+   ——该程序集在 `PublishTrimmed` 下被裁掉，`build` 与 Debug 都发现不了，只有裁剪后的发布版
+   一进 WebView2 就崩（`0xC000027B`，无任何提示）。改用文档化的环境变量
+   `WEBVIEW2_USER_DATA_FOLDER`（在 `App` 构造函数里设，早于任何 WebView2 创建），
+   不碰投影程序集。
+4. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
    展开，但鼠标点击落空"的假象——只做键盘自测会误判为正常。必须用
    `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)`
    把品牌区与菜单声明为可交互区，矩形是物理像素、相对窗口左上，尺寸 / DPI /

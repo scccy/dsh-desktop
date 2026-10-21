@@ -1,0 +1,40 @@
+fix(winui): 裁剪后的发布版一进 WebView2 就崩，改用 WEBVIEW2_USER_DATA_FOLDER
+
+装到 D:\soft\dsh-desktop 后应用启动约 12 秒即退出，退出码 0xC000027B
+（stowed exception），没有任何提示。Debug 版正常，只有裁剪后的发布版崩。
+
+定位：给壳加了崩溃落盘（%LOCALAPPDATA%\dsh desktop\logs\winui-crash.log），
+拿到真实异常：
+
+    System.IO.FileNotFoundException: Could not load file or assembly
+    'Microsoft.Web.WebView2.Core.Projection, Version=1.0.3537.50'
+
+即上一轮为「把 WebView2 profile 放到 %LOCALAPPDATA%」而调用的
+CoreWebView2Environment.CreateWithOptionsAsync：它依赖 WinRT 投影程序集，
+该程序集在 PublishTrimmed 下被裁掉（.dll 文件还在，但运行时加载不了），
+而 build / Debug 都不会暴露这个问题。
+
+修法：不碰投影程序集，改用文档化的环境变量 WEBVIEW2_USER_DATA_FOLDER，
+在 App 构造函数里设置（早于任何 WebView2 创建），profile 仍落到
+%LOCALAPPDATA%\dsh desktop\webview2。
+
+顺带的健壮性
+- App.UnhandledException 与 ShowBrowser 全包 try/catch：async void 抛异常会
+  直接带走进程且无提示，现在至少落盘并进错误页（这次能查出原因就是靠它）
+- ErrorLog 写在 Rust 核心的日志目录里，两边日志在一处
+
+验证脚本
+- verify-shell-menu.ps1 增加一次重试：切窗口后的第一次点击可能被"激活窗口"
+  吃掉（Windows 正常行为），之前会误报 FAIL
+
+文档
+- src-winui/README 工程陷阱从三条增到四条，补上这条裁剪陷阱
+
+实测
+- 修复后发布版（74.6 MB / 280 文件）冷启正常、页面加载正常、菜单鼠标可点开
+- 重新打包并覆盖安装到 D:\soft\dsh-desktop（78.9 MB / 283 文件），安装后
+  启动正常、菜单验证 PASS
+
+另外：清理了 14 个我此前反复强杀壳进程留下的孤儿 dsh 进程（父进程已退出）。
+强杀会跳过退出清理，这也说明原生壳还缺一层"子进程跟着壳一起死"的保障
+（Tauri 壳用 Job Object 做过），单实例锁那一步应一并补上。

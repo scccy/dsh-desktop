@@ -103,6 +103,14 @@ foreach ($case in $cases) {
 
     $visible = VisibleMenuItems
     $missing = $case.Expect | Where-Object { $visible -notcontains $_ }
+    if ($missing.Count -gt 0) {
+        # The first click after switching windows can be consumed by activation
+        # (normal Windows behaviour). Retry once before calling it a failure.
+        Dismiss
+        $null = ClickMenuBarItem $case.Menu
+        $visible = VisibleMenuItems
+        $missing = $case.Expect | Where-Object { $visible -notcontains $_ }
+    }
     if ($missing.Count -eq 0) {
         "PASS — '$($case.Menu)' opened by mouse click: $($case.Expect -join ', ')"
     } else {

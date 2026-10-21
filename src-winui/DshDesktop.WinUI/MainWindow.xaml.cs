@@ -233,33 +233,32 @@ public sealed partial class MainWindow : Window
         ScreenHost.Content = _error;
     }
 
-    private async void ShowBrowser(string url)
+    private void ShowBrowser(string url)
+    {
+        try
+        {
+            ShowBrowserCore(url);
+        }
+        catch (Exception error)
+        {
+            // An async void method that throws takes the whole process down with
+            // a stowed exception and no message; the page is the last resort.
+            ErrorLog.Write("browser", error);
+            ShowError("internal", $"无法显示 dsh 页面：{error.Message}");
+        }
+    }
+
+    private void ShowBrowserCore(string url)
     {
         if (_browser is null)
         {
             _browser = new Microsoft.UI.Xaml.Controls.WebView2();
         }
 
-        // WebView2 defaults to a user-data folder next to the executable, which
-        // fails when the shell is installed under Program Files. Pin it to the
-        // per-user local app data directory instead.
-        if (_browser.CoreWebView2 is null)
-        {
-            try
-            {
-                var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment
-                    .CreateWithOptionsAsync(
-                        browserExecutableFolder: null,
-                        userDataFolder: WebViewDataFolder(),
-                        options: null);
-                await _browser.EnsureCoreWebView2Async(environment);
-            }
-            catch (Exception error)
-            {
-                ShowError("internal", $"WebView2 初始化失败：{error.Message}");
-                return;
-            }
-        }
+        // The profile folder is chosen in App's constructor through
+        // WEBVIEW2_USER_DATA_FOLDER: calling CreateWithOptionsAsync here would
+        // need Microsoft.Web.WebView2.Core.Projection, which the trimmed publish
+        // drops (FileNotFoundException at runtime).
 
         if (!string.Equals(url, _lastUrl, StringComparison.Ordinal))
         {
@@ -273,15 +272,7 @@ public sealed partial class MainWindow : Window
         ScreenHost.Content = _browser;
     }
 
-    /// <summary>Per-user WebView2 profile directory for this shell.</summary>
-    private static string WebViewDataFolder()
-    {
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "dsh desktop");
-        Directory.CreateDirectory(root);
-        return Path.Combine(root, "webview2");
-    }
+
 
     private async void ShowSettings()
     {
