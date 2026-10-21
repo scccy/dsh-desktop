@@ -15,6 +15,9 @@
     <RootNamespace>DshDesktop.WinUI</RootNamespace>
     <AssemblyName>dsh-desktop-winui</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Taskbar, Alt+Tab, Start Menu and desktop shortcuts all take the icon from
+         the executable, so it must be embedded (there is no manifest icon path). -->
+    <ApplicationIcon>..\..\src-tauri\icons\icon.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

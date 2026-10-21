@@ -122,7 +122,9 @@ pwsh -File scripts\build-installer.ps1        # Rust 桥 → dotnet publish → 
 - **实测**（2026-10-21，修正布局后）：`dotnet publish` 71.3 MB / 114 文件 → 安装包 **20.2 MB**（lzma2）；静默安装 → 启动 → 卸载全流程验证通过，卸载后目录被清空；
 - **安装布局**：根目录只有三项 —— `app\`（应用本体，114 个文件）、`安装说明.txt`、`unins000.exe`/`.dat`。发布输出本身是平铺的一堆文件，永远不直接铺在根目录；
 - **语言资源**：publish 默认带 87 个 culture 目录（WinAppSDK 原生 `.mui`），构建脚本在打包前只保留 `en-us` / `zh-CN` / `zh-TW`（+ `Microsoft.UI.Xaml`），其余目录直接删掉。**不能用 Inno 的 `Excludes` 做这件事**：它只匹配文件名，而每个 culture 里的文件名完全相同（`Microsoft.ui.xaml.dll.mui`），按名字分不出 `zh-CN` 和 `af-ZA`；
-- 安装形态：per-user（`PrivilegesRequired=lowest`，**不弹 UAC**），默认装到 `%LOCALAPPDATA%\Programs\dsh desktop`，安装时可选 all-users；开始菜单快捷方式 + 可选桌面快捷方式；卸载入口在「设置 → 应用」与开始菜单「Uninstall dsh desktop」，也可直接运行安装目录里的 `unins000.exe`；
+- 安装形态：per-user（`PrivilegesRequired=lowest`，**不弹 UAC**），默认装到 `%LOCALAPPDATA%\Programs\dsh desktop`，安装时可选 all-users；卸载入口在「设置 → 应用」与开始菜单「Uninstall dsh desktop」，也可直接运行安装目录里的 `unins000.exe`；
+- **快捷方式**：开始菜单（程序 + 卸载）、**桌面（默认勾选）**，外加安装目录里一个可见的 `启动 dsh desktop.lnk`（载荷在 `app\` 下，不该让人猜）。静默安装要桌面图标时必须带 `/MERGETASKS=desktopicon`，否则任务被跳过；
+- **图标**：`<ApplicationIcon>` 指向 `src-tauri/icons/icon.ico`，exe 内嵌后任务栏 / Alt+Tab / 开始菜单 / 桌面快捷方式共用这一个图标（未打包应用没有 manifest 图标路径，只能靠 exe 资源）；
 - 用户数据（`%LOCALAPPDATA%\dsh desktop`：WebView2 profile、滚动日志、`config.toml`）卸载时**故意保留**；
 - 版本号唯一来源是 `Cargo.toml` 的 `[workspace.package] version`，脚本读取后以 `/DAppVersion` 传给 ISCC，不在 `.iss` 里写死；
 - **未签名**：SmartScreen 会提示"未知发布者"。签名点位就在 ISCC 产物上（`signtool sign /fd sha256 /tr <时间戳> dist\dsh-desktop-winui-setup-*.exe`），证书到位后接进脚本即可，不影响今天的分发；

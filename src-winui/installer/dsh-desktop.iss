@@ -59,7 +59,7 @@ RestartApplications=no
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 ; Everything the app needs lives under {app}\app so the install folder root stays
@@ -73,6 +73,9 @@ Source: "{#RepoRoot}\src-winui\installer\after-install.txt"; DestDir: "{app}"; D
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\app\{#AppExe}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
+; A visible launcher in the install folder itself: the payload lives in app\, and
+; nobody should have to guess that.
+Name: "{app}\启动 {#AppName}"; Filename: "{app}\app\{#AppExe}"; WorkingDir: "{app}\app"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\app\{#AppExe}"; Tasks: desktopicon
 
 [Run]
