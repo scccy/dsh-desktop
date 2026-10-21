@@ -19,43 +19,23 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Height="40" Background="Transparent">
+        <!--
+            The row uses the page's sidebar fill, not the Mica tint, so it reads
+            as the top of the hosted page instead of a second header glued above
+            the page's own one.
+        -->
+        <Grid
+            x:Name="AppTitleBar"
+            Height="40"
+            Background="{ThemeResource ShellTitleBarFillBrush}">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <StackPanel
-                x:Name="BrandArea"
-                Grid.Column="0"
-                Margin="14,0,0,0"
-                VerticalAlignment="Center"
-                Orientation="Horizontal"
-                Spacing="8">
-                <Grid
-                    Width="16"
-                    Height="16"
-                    Background="{ThemeResource AccentFillColorDefaultBrush}"
-                    CornerRadius="4">
-                    <TextBlock
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        FontSize="11"
-                        FontWeight="Bold"
-                        Foreground="White"
-                        Text="d" />
-                </Grid>
-                <TextBlock
-                    VerticalAlignment="Center"
-                    FontSize="12"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="dsh desktop" />
-            </StackPanel>
-
             <MenuBar
                 x:Name="AppMenu"
-                Grid.Column="1"
+                Grid.Column="0"
                 Height="32"
                 Margin="10,0,0,0"
                 VerticalAlignment="Center"
@@ -90,7 +70,7 @@
                  without passthrough regions. Double-click maximizes (框架处理). -->
             <Border
                 x:Name="DragRegion"
-                Grid.Column="2"
+                Grid.Column="1"
                 Background="Transparent" />
         </Grid>
 

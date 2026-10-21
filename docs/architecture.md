@@ -211,7 +211,7 @@ d  刷写日志、释放单实例锁、退出
 
 ### ADR-004 Windows 原生壳自绘标题栏行，内容属于壳
 
-**决策**：`src-winui` 用 `ExtendsContentIntoTitleBar` 自绘一条 40 DIP 标题栏行：左侧图标 + 产品名 + **壳自己的菜单**（应用 / 视图），右侧最小化 / 最大化 / 关闭仍由 Windows 绘制。不向承载的 dsh 页面注入任何脚本。
+**决策**：`src-winui` 用 `ExtendsContentIntoTitleBar` 自绘一条 40 DIP 标题栏行：只有**壳自己的菜单**（应用 / 视图），右侧最小化 / 最大化 / 关闭仍由 Windows 绘制，行底色取页面侧栏填充色。不向承载的 dsh 页面注入任何脚本。
 
 **背景**：官方 Electron 客户端的做法（已从 `app.asar` 逐条核对）：`titleBarStyle: "hidden"` + `titleBarOverlay{height:40}` 让 Windows 把系统按钮画进 40 DIP 覆盖层，preload 再往页面注入 `data-windows-titlebar` 与 `--dsh-windows-titlebar-height`；页面侧 CSS 命中 `[data-windows-titlebar]` 后 `padding-top` 让位，并把 `:before` 设为 `-webkit-app-region: drag`。也就是说，**那条「应用 / 编辑」是网页自己画的**，React 侧用 `document.documentElement.hasAttribute("data-windows-titlebar")` 判断是否进入桌面端布局。
 
@@ -225,14 +225,16 @@ d  刷写日志、释放单实例锁、退出
 | 保持系统标题栏（ADR-001 原样） | 与官方观感差异明显，而产品已把这条列为本壳能力 | 否掉 |
 | 全自绘包含最小化/最大化/关闭 | 会丢失 Windows 11 的 Snap 布局悬浮菜单、主题同步与系统无障碍语义 | 否掉：系统按钮继续交给系统 |
 
-**实现要点（两个必须记住的陷阱）**：
+**实现要点（三个必须记住的陷阱）**：
 
-1. **标题栏带默认是非客户区**：菜单会"能拿到键盘焦点、能用空格展开，但鼠标点击落空"——只用键盘自测会误判为正常。必须用 `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)` 把品牌区与菜单声明为可交互区，且矩形是**物理像素、相对窗口左上**，窗口尺寸 / DPI / 最大化切换后都要重算。回归检查脚本：`src-winui/verify-shell-menu.ps1`（真实鼠标点击 + UI 自动化断言，不是截图）。
+1. **标题栏带默认是非客户区**：菜单会"能拿到键盘焦点、能用空格展开，但鼠标点击落空"——只用键盘自测会误判为正常。必须用 `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)` 把菜单声明为可交互区，且矩形是**物理像素、相对窗口左上**，窗口尺寸 / DPI / 最大化切换后都要重算。回归检查脚本：`src-winui/verify-shell-menu.ps1`（对两个菜单分别做真实鼠标点击 + UI 自动化断言，不是截图）。
 2. **`SetTitleBar` 只绑定拖拽面**：只给菜单右侧的空白条（`DragRegion`），整行绑成拖拽区会吞掉菜单点击；双击最大化仍由框架处理。
+3. **底色必须跟页面侧栏一致，不能用 Mica**：Mica 会吃壁纸色调（实测窗口顶带 `#F9F1EF`，页面侧栏 `#F9FAFB`），两者一深浅不同就成了"两块头贴在一起"。行底色改为页面侧栏填充色（浅色 `#F9FAFB`，从运行中的页面取样；深色 `#17181B` 为近似值，切换深色主题时需复核）。
 
 **后果**：
 
 - 观感接近官方但**不等于**官方：菜单项是壳的动作（打开设置 / 重试连接 / 打开日志目录 / 退出 / 刷新页面 / 关于），不是网页的编辑菜单；WinUI 的标题栏带只有 32 / 48 DIP 两档，而 Electron 是任意 40，所以系统按钮与 40 DIP 行不同高——这是平台差异，不伪装；
+- **行里不放品牌块**：产品名与图标只出现在窗口标题（任务栏 / Alt+Tab）与"关于"对话框里。放了品牌块就等于在页面自己的 logo 行上方再加一条同字号的信息条，重复且更显"两块头"；
 - 页面左上角不会出现官方的 16 DIP 圆角与内容让位：那是网页在 `[data-windows-titlebar]` 下自己画的，壳不注入就不该有；
 - 零 JS 注入策略不变（§5）；
 - 托盘图标、快捷键注册仍未做，见 §7 对照表。

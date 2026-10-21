@@ -33,8 +33,11 @@ dotnet publish src-winui/DshDesktop.WinUI/DshDesktop.WinUI.csproj `
 
 壳自绘一条 40 DIP 标题栏行（`ExtendsContentIntoTitleBar`，见 ADR-004）：
 
-- 左侧：图标 + 产品名 + **壳自己的菜单**（应用 / 视图）；
+- 左侧只有**壳自己的菜单**（应用 / 视图），没有品牌块——产品名只出现在窗口标题
+  （任务栏 / Alt+Tab）与"关于"对话框里；
 - 右侧：最小化 / 最大化 / 关闭仍由 Windows 绘制，主题与 Snap 布局悬浮菜单保持系统行为；
+- **行底色用页面侧栏填充色**（浅色 `#F9FAFB`，从运行中的页面取样），不用 Mica：Mica 会吃
+  壁纸色调（实测窗口顶带 `#F9F1EF` vs 页面侧栏 `#F9FAFB`），一深一浅就成了"两块头贴在一起"；
 - 拖拽面只绑定菜单右侧的空白条（`DragRegion`），菜单本身不受影响；双击该条最大化由框架处理；
 - Windows 10 上若不支持标题栏定制，整行折叠、退回系统标题栏。
 

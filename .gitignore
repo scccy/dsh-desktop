@@ -32,6 +32,8 @@
 src-winui/**/bin/
 src-winui/**/obj/
 src-winui/out-*/
+# WebView2 运行时用户数据（下次启动会重新生成）
+*.exe.WebView2/
 
 # 编辑器 / 系统
 .vscode/*

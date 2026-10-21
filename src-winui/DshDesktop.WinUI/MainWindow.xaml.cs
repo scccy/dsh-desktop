@@ -97,9 +97,9 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Marks the brand block and the menu bar as client areas inside the caption
-    /// band. Rectangles are physical pixels relative to the window's top-left, so
-    /// they are rescaled with the window's DPI.
+    /// Marks the menu bar as a client area inside the caption
+    /// band (the row has no other interactive content). Rectangles are physical
+    /// pixels relative to the window's top-left, so they follow the window's DPI.
     /// </summary>
     private void UpdateTitleBarPassthrough()
     {
@@ -109,8 +109,8 @@ public sealed partial class MainWindow : Window
         }
 
         var scale = RootGrid.XamlRoot.RasterizationScale;
-        var rects = new List<RectInt32>(2);
-        foreach (var element in new FrameworkElement[] { BrandArea, AppMenu })
+        var rects = new List<RectInt32>(1);
+        foreach (var element in new FrameworkElement[] { AppMenu })
         {
             if (element.ActualWidth <= 0 || element.ActualHeight <= 0)
             {
@@ -230,11 +230,32 @@ public sealed partial class MainWindow : Window
         ScreenHost.Content = _error;
     }
 
-    private void ShowBrowser(string url)
+    private async void ShowBrowser(string url)
     {
         if (_browser is null)
         {
             _browser = new Microsoft.UI.Xaml.Controls.WebView2();
+        }
+
+        // WebView2 defaults to a user-data folder next to the executable, which
+        // fails when the shell is installed under Program Files. Pin it to the
+        // per-user local app data directory instead.
+        if (_browser.CoreWebView2 is null)
+        {
+            try
+            {
+                var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment
+                    .CreateWithOptionsAsync(
+                        browserExecutableFolder: null,
+                        userDataFolder: WebViewDataFolder(),
+                        options: null);
+                await _browser.EnsureCoreWebView2Async(environment);
+            }
+            catch (Exception error)
+            {
+                ShowError("internal", $"WebView2 初始化失败：{error.Message}");
+                return;
+            }
         }
 
         if (!string.Equals(url, _lastUrl, StringComparison.Ordinal))
@@ -247,6 +268,16 @@ public sealed partial class MainWindow : Window
 
         _beforeSettings = null;
         ScreenHost.Content = _browser;
+    }
+
+    /// <summary>Per-user WebView2 profile directory for this shell.</summary>
+    private static string WebViewDataFolder()
+    {
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "dsh desktop");
+        Directory.CreateDirectory(root);
+        return Path.Combine(root, "webview2");
     }
 
     private async void ShowSettings()

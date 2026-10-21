@@ -9,6 +9,25 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
 
+            <ResourceDictionary.ThemeDictionaries>
+                <!--
+                    The caption row sits directly on top of the hosted page, so it
+                    must use the page's sidebar fill instead of the Mica tint:
+                    Mica picks up the wallpaper and reads as a second, differently
+                    coloured header glued to the page's own header row.
+                    Light value sampled from the running page (#F9FAFB).
+                -->
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="ShellTitleBarFillBrush" Color="#F9FAFB" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="ShellTitleBarFillBrush" Color="#17181B" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="ShellTitleBarFillBrush" Color="{ThemeResource SystemColorWindowColor}" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
             <!-- Shell-drawn pages only. The dsh web UI brings its own styles. -->
             <x:Double x:Key="ShellCardCornerRadius">8</x:Double>
             <Style x:Key="ShellTitle" TargetType="TextBlock">
