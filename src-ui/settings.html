@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dsh desktop — 设置</title>
+    <link rel="stylesheet" href="shell.css" />
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">d</span>
+        <h1>设置 (Settings)</h1>
+      </div>
+      <p class="sub">
+        设置写入 config.toml；保存后点“重试连接”或重新加载窗口生效。<br />
+        <span lang="en"
+          >Settings are written to config.toml and apply on the next connection
+          attempt.</span
+        >
+      </p>
+
+      <h2>运行信息 / Runtime</h2>
+      <dl>
+        <dt>壳版本 / Shell</dt>
+        <dd data-role="shell-version">—</dd>
+        <dt>dsh 路径 / dsh path</dt>
+        <dd data-role="dsh-path">—</dd>
+        <dt>dsh 版本 / dsh version</dt>
+        <dd data-role="dsh-version">—</dd>
+        <dt>Node 版本 / Node</dt>
+        <dd data-role="node-version">—</dd>
+        <dt>连接模式 / Mode</dt>
+        <dd data-role="connect-mode">—</dd>
+        <dt>本次实际端口 / Live port</dt>
+        <dd data-role="port">—</dd>
+        <dt>配置端口 / Configured port</dt>
+        <dd data-role="configured-port">—</dd>
+        <dt>日志目录 / Logs</dt>
+        <dd data-role="log-dir">—</dd>
+        <dt>配置文件 / Config</dt>
+        <dd data-role="config-path">—</dd>
+      </dl>
+
+      <h2>连接 / Connection</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="connect-mode">连接模式 (mode)</label>
+          <select id="connect-mode">
+            <option value="spawn">spawn — 由壳启动 dsh</option>
+            <option value="url">url — 附着到完整 URL</option>
+            <option value="port">port — 附着到本机端口</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="port">端口 (port, 0 = 由系统分配)</label>
+          <input id="port" type="number" min="0" max="65535" step="1" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="url">附着 URL (mode = url 时使用；已配置时不会显示，重新输入可覆盖)</label>
+        <input
+          id="url"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="留空表示保持原值 / leave empty to keep the stored value"
+        />
+        <p class="hint" data-role="url-state"></p>
+      </div>
+
+      <h2>dsh</h2>
+      <div class="field">
+        <label for="profile">profile</label>
+        <input
+          id="profile"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          autofocus
+        />
+      </div>
+
+      <h2>窗口 / Window</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="close-action">关闭窗口时 (closeAction)</label>
+          <select id="close-action">
+            <option value="quit">quit — 退出应用</option>
+            <option value="hide">hide — 隐藏到后台</option>
+          </select>
+        </div>
+      </div>
+      <div class="check">
+        <input id="remember-bounds" type="checkbox" />
+        <label for="remember-bounds">记住窗口大小与位置 (rememberBounds)</label>
+      </div>
+      <div class="check">
+        <input id="devtools" type="checkbox" />
+        <label for="devtools">启用 DevTools 与页面快捷键 (devtools)</label>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="primary" data-action="save">
+          保存 (Save)
+        </button>
+        <button type="button" data-action="back">返回应用 (Back to app)</button>
+        <button type="button" data-action="retry">重试连接 (Reconnect)</button>
+        <button type="button" data-action="logs">打开日志目录 (Open logs)</button>
+      </div>
+      <p class="status" data-role="status"></p>
+    </main>
+
+    <script>
+      (function () {
+        var internals = window.__TAURI_INTERNALS__;
+        function invoke(command, args) {
+          if (!internals || typeof internals.invoke !== "function") {
+            return Promise.reject(new Error("shell IPC unavailable"));
+          }
+          return internals.invoke(command, args || {});
+        }
+
+        var status = document.querySelector('[data-role="status"]');
+        function report(text, ok) {
+          status.textContent = text;
+          status.className = "status " + (ok ? "ok" : "error");
+        }
+
+        function text(role, value) {
+          document.querySelector('[data-role="' + role + '"]').textContent =
+            value === null || value === undefined || value === ""
+              ? "—"
+              : String(value);
+        }
+
+        var fields = {
+          profile: document.getElementById("profile"),
+          connectMode: document.getElementById("connect-mode"),
+          url: document.getElementById("url"),
+          port: document.getElementById("port"),
+          closeAction: document.getElementById("close-action"),
+          rememberBounds: document.getElementById("remember-bounds"),
+          devtools: document.getElementById("devtools"),
+        };
+
+        var urlConfigured = false;
+
+        function load() {
+          return invoke("shell_info")
+            .then(function (info) {
+              text("shell-version", info.shellVersion);
+              text("dsh-path", info.dshPath);
+              text("dsh-version", info.dshVersion);
+              text("node-version", info.nodeVersion);
+              text("connect-mode", info.connectMode);
+              text("port", info.port);
+              text("configured-port", info.configuredPort);
+              text("log-dir", info.logDir);
+              text("config-path", info.configPath);
+
+              urlConfigured = info.urlSet === true;
+              document.querySelector('[data-role="url-state"]').textContent =
+                urlConfigured
+                  ? "config.toml 里已保存一个附着 URL（内容不外显）。"
+                  : "config.toml 里还没有保存附着 URL。";
+
+              fields.profile.value = info.profile || "";
+              fields.connectMode.value = info.connectMode || "spawn";
+              // The form edits the configured port, never the port this run
+              // happened to get from the operating system.
+              fields.port.value = info.configuredPort === undefined ? 0 : info.configuredPort;
+              fields.url.value = "";
+              fields.closeAction.value = info.closeAction || "quit";
+              fields.rememberBounds.checked = info.rememberBounds !== false;
+              fields.devtools.checked = info.devtools === true;
+              if (info.detail) {
+                report(info.detail, false);
+              }
+            })
+            .catch(function (error) {
+              report(String(error), false);
+            });
+        }
+
+        function save() {
+          var typedUrl = fields.url.value.trim();
+          var payload = {
+            profile: fields.profile.value,
+            connectMode: fields.connectMode.value,
+            // A stored URL may carry a token, so it is only replaced when the
+            // user typed a new one.
+            url: typedUrl === "" ? null : typedUrl,
+            port: Number(fields.port.value || 0),
+            closeAction: fields.closeAction.value,
+            rememberBounds: fields.rememberBounds.checked,
+            devtools: fields.devtools.checked,
+          };
+          if (payload.connectMode === "url" && typedUrl === "" && !urlConfigured) {
+            report("mode = url 时必须填写附着 URL。", false);
+            return;
+          }
+          invoke("save_settings", { settings: payload }).then(
+            function () {
+              report("已保存 / Saved", true);
+              return load();
+            },
+            function (error) {
+              report(String(error), false);
+            }
+          );
+        }
+
+        document
+          .querySelector('[data-action="save"]')
+          .addEventListener("click", save);
+        document
+          .querySelector('[data-action="back"]')
+          .addEventListener("click", function () {
+            invoke("return_to_app").catch(function (error) {
+              report(String(error), false);
+            });
+          });
+        document
+          .querySelector('[data-action="retry"]')
+          .addEventListener("click", function () {
+            report("正在重新连接… / Reconnecting…", true);
+            invoke("retry_connection").catch(function (error) {
+              report(String(error), false);
+            });
+          });
+        document
+          .querySelector('[data-action="logs"]')
+          .addEventListener("click", function () {
+            invoke("open_logs").catch(function (error) {
+              report(String(error), false);
+            });
+          });
+
+        load();
+      })();
+    </script>
+  </body>
+</html>

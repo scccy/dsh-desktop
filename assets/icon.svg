@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="dsh desktop">
+  <!-- 占位设计稿：圆角深色底 + 字母 d。正式素材由设计稿替换后重跑 scripts/render-icons.ps1。 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="225" ry="225" fill="#18191C"/>
+  <text x="512" y="512" fill="#4D6BFE" font-family="Segoe UI, Arial, 'DejaVu Sans', sans-serif"
+        font-size="635" font-weight="700" text-anchor="middle" dominant-baseline="central">d</text>
+</svg>

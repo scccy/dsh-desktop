@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dsh desktop</title>
+    <link rel="stylesheet" href="shell.css" />
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">d</span>
+        <h1>dsh desktop</h1>
+      </div>
+      <p data-role="status">正在启动 dsh…</p>
+      <p class="sub" data-role="status-en" lang="en">Starting dsh…</p>
+      <div class="spinner" role="progressbar" aria-label="starting"></div>
+      <p class="hint" data-role="hint">
+        首次启动需要启动 dsh 并加载工作区，通常需要几秒到几十秒。
+      </p>
+      <p class="hint" lang="en">
+        The first launch starts dsh and loads the workspace, which usually takes
+        a few seconds.
+      </p>
+      <div class="actions">
+        <button type="button" data-action="logs">打开日志目录 (Open logs)</button>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        var internals = window.__TAURI_INTERNALS__;
+        function invoke(command, args) {
+          if (!internals || typeof internals.invoke !== "function") {
+            return Promise.reject(new Error("shell IPC unavailable"));
+          }
+          return internals.invoke(command, args || {});
+        }
+
+        var messages = {
+          idle: ["准备启动 dsh…", "Preparing to start dsh…"],
+          connecting: ["正在启动 dsh…", "Starting dsh…"],
+          ready: ["已连接，正在加载工作区…", "Connected, loading the workspace…"],
+          failed: ["启动失败，正在打开错误页…", "Startup failed, opening the error page…"],
+        };
+
+        function paint(status) {
+          var pair = messages[status];
+          if (!pair) {
+            return;
+          }
+          document.querySelector('[data-role="status"]').textContent = pair[0];
+          document.querySelector('[data-role="status-en"]').textContent = pair[1];
+        }
+
+        function poll() {
+          invoke("shell_info")
+            .then(function (info) {
+              paint(info && info.status);
+            })
+            .catch(function () {
+              /* a page without IPC keeps the static text */
+            });
+        }
+
+        document
+          .querySelector('[data-action="logs"]')
+          .addEventListener("click", function () {
+            invoke("open_logs").catch(function () {});
+          });
+
+        poll();
+        window.setInterval(poll, 800);
+      })();
+    </script>
+  </body>
+</html>

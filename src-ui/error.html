@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dsh desktop — 启动失败</title>
+    <link rel="stylesheet" href="shell.css" />
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">d</span>
+        <h1 data-role="title">启动失败</h1>
+      </div>
+      <p data-role="body">dsh desktop 无法连接到 dsh。</p>
+      <p class="sub" data-role="body-en" lang="en">
+        dsh desktop could not connect to dsh.
+      </p>
+
+      <h2>下一步 / What to do</h2>
+      <ul class="sub" data-role="steps"></ul>
+
+      <p class="hint" data-role="command-hint">
+        可以在终端里手动验证：
+      </p>
+      <div class="detail" data-role="command"></div>
+
+      <div class="detail" data-role="detail" hidden></div>
+
+      <div class="actions">
+        <button type="button" class="primary" data-action="retry">
+          重试 (Retry)
+        </button>
+        <button type="button" data-action="logs">打开日志目录 (Open logs)</button>
+        <button type="button" data-action="settings">打开设置 (Settings)</button>
+        <button type="button" data-action="web-profile" hidden>
+          改用 web profile (Use the web profile)
+        </button>
+        <button type="button" data-action="copy">复制命令 (Copy command)</button>
+      </div>
+      <p class="status" data-role="status"></p>
+    </main>
+
+    <script>
+      (function () {
+        var internals = window.__TAURI_INTERNALS__;
+        function invoke(command, args) {
+          if (!internals || typeof internals.invoke !== "function") {
+            return Promise.reject(new Error("shell IPC unavailable"));
+          }
+          return internals.invoke(command, args || {});
+        }
+
+        // Every kind the shell can report; the detail text is already redacted
+        // by the shell before it reaches this page.
+        var kinds = {
+          "dsh-not-found": {
+            title: "找不到 dsh (dsh was not found)",
+            body: "壳在你的 PATH 与常见安装位置里都没有找到可用的 dsh。",
+            bodyEn:
+              "No usable dsh was found in PATH or in the usual install locations.",
+            steps: [
+              "安装 dsh：npm install -g @deepseek-ai/dsh",
+              "或用 --dsh-path 指向已有的 dsh，或写入配置的 [dsh] path。",
+            ],
+            command: "npm install -g @deepseek-ai/dsh",
+            webProfile: false,
+          },
+          version: {
+            title: "dsh 版本过低 (dsh is too old)",
+            body: "已安装的 dsh 不在支持的版本范围内（>= 0.2.0，< 1.0.0）。",
+            bodyEn:
+              "The installed dsh is outside the supported range (>= 0.2.0, < 1.0.0).",
+            steps: ["升级 dsh：npm install -g @deepseek-ai/dsh@latest"],
+            command: "npm install -g @deepseek-ai/dsh@latest",
+            webProfile: false,
+          },
+          profile: {
+            title: "profile 无法启动 (profile could not be started)",
+            body: "配置里的 profile 不存在或无法通过 dsh 的预检。",
+            bodyEn:
+              "The configured profile does not exist or failed the dsh preflight.",
+            steps: [
+              "改用内置的 web profile（下面的按钮会把它写回配置），或",
+              "在终端里创建该 profile 后重试。",
+            ],
+            command: "dsh --profile web --dump-config",
+            webProfile: true,
+          },
+          ready: {
+            title: "dsh 没有报告就绪地址 (no ready URL)",
+            body: "dsh 在超时前没有打印 `dsh web:` 行，或者该行无法解析。",
+            bodyEn:
+              "dsh did not print a `dsh web:` line before the deadline, or the line was unusable.",
+            steps: [
+              "在终端里手动运行下列命令，查看 dsh 自身的报错；",
+              "修好之后再回来点“重试”。",
+            ],
+            command: "dsh web --host 127.0.0.1 --port 0",
+            webProfile: false,
+          },
+          auth: {
+            title: "认证失败 (authentication failed)",
+            body: "页面加载完成后地址里仍然带着 token，说明一次性 token 没有被消费。",
+            bodyEn:
+              "The address still carried the token after the page loaded, so the one-shot token was never consumed.",
+            steps: [
+              "在运行 dsh 的终端里复制完整的 `dsh web:` 行，用 --url 重新附着；",
+              "或改用托管模式，让壳自己启动 dsh。",
+            ],
+            command: "dsh web --host 127.0.0.1 --port 0",
+            webProfile: false,
+          },
+        };
+
+        var params = new URLSearchParams(window.location.search);
+        var kindName = params.get("kind") || "ready";
+        var kind = kinds[kindName] || kinds.ready;
+        var detail = params.get("detail") || "";
+
+        document.title = "dsh desktop — " + kind.title;
+        document.querySelector('[data-role="title"]').textContent = kind.title;
+        document.querySelector('[data-role="body"]').textContent = kind.body;
+        document.querySelector('[data-role="body-en"]').textContent = kind.bodyEn;
+        document.querySelector('[data-role="command"]').textContent = kind.command;
+
+        var steps = document.querySelector('[data-role="steps"]');
+        kind.steps.forEach(function (step) {
+          var item = document.createElement("li");
+          item.textContent = step;
+          steps.appendChild(item);
+        });
+
+        var detailBlock = document.querySelector('[data-role="detail"]');
+        if (detail) {
+          detailBlock.textContent = detail;
+          detailBlock.hidden = false;
+        }
+
+        if (kind.webProfile) {
+          document.querySelector('[data-action="web-profile"]').hidden = false;
+        }
+
+        var status = document.querySelector('[data-role="status"]');
+        function report(text, ok) {
+          status.textContent = text;
+          status.className = "status " + (ok ? "ok" : "error");
+        }
+
+        document.querySelector('[data-action="retry"]').addEventListener("click", function () {
+          report("正在重试… / Retrying…", true);
+          invoke("retry_connection").catch(function (error) {
+            report(String(error), false);
+          });
+        });
+
+        document.querySelector('[data-action="logs"]').addEventListener("click", function () {
+          invoke("open_logs").catch(function (error) {
+            report(String(error), false);
+          });
+        });
+
+        document.querySelector('[data-action="settings"]').addEventListener("click", function () {
+          window.location.href = "settings.html";
+        });
+
+        document
+          .querySelector('[data-action="web-profile"]')
+          .addEventListener("click", function () {
+            report("正在切换到 web profile… / Switching to the web profile…", true);
+            invoke("use_web_profile").catch(function (error) {
+              report(String(error), false);
+            });
+          });
+
+        document.querySelector('[data-action="copy"]').addEventListener("click", function () {
+          var text = kind.command;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+              function () {
+                report("已复制到剪贴板 / Copied", true);
+              },
+              function () {
+                report("无法访问剪贴板 / Clipboard unavailable", false);
+              }
+            );
+            return;
+          }
+          report("无法访问剪贴板 / Clipboard unavailable", false);
+        });
+      })();
+    </script>
+  </body>
+</html>

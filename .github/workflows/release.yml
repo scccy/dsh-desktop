@@ -1,0 +1,173 @@
+name: Release
+
+# Triggered only by `v*` tags, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# The three platform builds are independent; a failure on one keeps the others' artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload artifacts without creating a GitHub release
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            bundles: deb,appimage
+          - name: macos
+            os: macos-latest
+            bundles: dmg
+          # The Windows runner ships MSVC; the local MinGW toolchain is not used here.
+          - name: windows
+            os: windows-latest
+            bundles: nsis
+    env:
+      # Signing and notarization are opt-in: without the matching repository secrets
+      # every value below is empty, the bundler treats the identity as unset, and the
+      # artifacts are produced unsigned.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      HAS_SIGNING_SECRETS: ${{ secrets.APPLE_CERTIFICATE != '' || secrets.WINDOWS_CERTIFICATE != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+
+      # Tauri v2 CLI. Installed from crates.io so the release pipeline needs no Node
+      # toolchain, which matches the product constraint of shipping no Node runtime.
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Report signing mode
+        shell: bash
+        run: |
+          if [ "$HAS_SIGNING_SECRETS" = "true" ]; then
+            echo "Signing secrets are present; macOS artifacts are signed and notarized." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No signing secrets: artifacts are produced unsigned." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Windows Authenticode is not wired yet: importing the base64 PKCS#12 secret into
+      # the runner's certificate store and pointing `bundle.windows.certificateThumbprint`
+      # at it is a release-time task (see docs/development.md, "签名与公证").
+      # Until then a Windows run with the certificate secrets present still produces an
+      # unsigned NSIS installer, and the job warns instead of failing.
+      - name: Read Windows signing secret
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes(
+            "$env:RUNNER_TEMP\certificate.pfx",
+            [Convert]::FromBase64String("$env:WINDOWS_CERTIFICATE"))
+          Write-Host "::warning::Windows Authenticode is not wired in tauri.release.conf.json; this build is unsigned."
+
+      - name: Build bundles
+        run: cargo tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }} --verbose
+
+      # One SHA-256 line per artifact, in the standard `<hash>  <file>` format so that
+      # users can run `sha256sum -c` / `shasum -a 256 -c` on the downloaded file.
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          shopt -s nullglob
+          artifacts=(src-tauri/target/release/bundle/*/*.msi src-tauri/target/release/bundle/*/*.exe src-tauri/target/release/bundle/*/*.dmg src-tauri/target/release/bundle/*/*.deb src-tauri/target/release/bundle/*/*.AppImage src-tauri/target/release/bundle/*/*.app.tar.gz)
+          if [ ${#artifacts[@]} -eq 0 ]; then
+            echo "no bundle artifacts found" >&2
+            exit 1
+          fi
+          for artifact in "${artifacts[@]}"; do
+            cp "$artifact" dist/
+          done
+          cd dist
+          # macOS runners have no coreutils; `shasum -a 256` produces the same format.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            digest="shasum -a 256"
+          else
+            digest="sha256sum"
+          fi
+          $digest * | tee SHA256SUMS.txt
+          $digest -c SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish release
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'dsh-desktop-*'
+          path: release
+          merge-multiple: true
+
+      # SHA256SUMS.txt is uploaded once per platform; keep a single merged copy that
+      # lists every artifact, so one `sha256sum -c` verifies all downloads at once.
+      - name: Merge per-platform checksum files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            release/*

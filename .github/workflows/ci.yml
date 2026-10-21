@@ -1,0 +1,79 @@
+name: CI
+
+# Runs on every branch push, every pull request, and on demand.
+# Release builds live in release.yml and only run for `v*` tags.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer commit on the same ref cancels the previous run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+          # The Windows runner ships MSVC; the local MinGW toolchain is not used here.
+          - name: windows
+            os: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Tauri v2 needs WebKitGTK 4.1, GTK 3, librsvg and the AppIndicator runtime.
+      # Must run before any cargo invocation so that build scripts find pkg-config files.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      # rust-toolchain.toml pins `stable` with clippy and rustfmt, so these components
+      # must be requested here as well for the action's toolchain to satisfy it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache the release profile used by the final build step.
+          cache-all-crates: true
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release binary
+        run: cargo build --release -p dsh-desktop
