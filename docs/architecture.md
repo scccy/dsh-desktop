@@ -73,6 +73,8 @@ src-tauri/src/platform/
 11 稳定运行：记忆窗口尺寸/位置/最大化，外链走系统浏览器
 ```
 
+子进程的生命周期由两层保障，且**不依赖退出钩子**：正常路径走 `dsh_stop`／`stop()`（先请求退出、超时强杀），异常路径（壳被强杀、崩溃、调试器停止）由 Windows Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）兜底 —— 句柄随子进程句柄存活，本进程一死就关闭，整棵进程树被系统回收。实现位于 `crates/dsh-lite-core`，两个壳共用。
+
 退出时序（顺序不可交换）：
 
 ```text
@@ -255,7 +257,8 @@ d  刷写日志、释放单实例锁、退出
 | 检查 dsh 更新（`npm view`，只报告不安装） | 有（菜单栏） | 有（应用 → 检查 dsh 更新，经桥接） |
 | 预检 profile / 登录 shell 探针 | 有 | **未接**（Windows 无需登录 shell 探针；预检待接） |
 | 托盘图标 / 全局快捷键 | 有 | **未接** |
-| 单实例锁 | 有 | **未接** |
+| 单实例锁 | 有（`tauri-plugin-single-instance`） | 有（命名互斥量 + 命名事件，第二实例提到前台后退出） |
+| 子进程跟随壳一起死 | 有（`dsh-lite-core` Job Object，两壳共用） | 有（同一 Job Object，`KILL_ON_JOB_CLOSE`） |
 | 认证校验（终态 URL 断言） | 有 | **未做**（依赖 WebView2 跟随 302） |
 | 设置写回 `config.toml` | 有 | **只读** |
 | 打包 | Tauri bundler（msi/dmg/deb） | 未打包绿色目录 |

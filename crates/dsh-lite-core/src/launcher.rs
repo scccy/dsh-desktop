@@ -37,6 +37,17 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 type SharedTail = Arc<Mutex<Vec<u8>>>;
 
+/// Handle to the platform mechanism that keeps the child from outliving us.
+#[cfg(windows)]
+type ChildJobHandle = crate::job::ChildJob;
+
+/// Placeholder on platforms where the process group already covers it; the field
+/// stays in the struct so the constructor reads the same everywhere.
+#[cfg(not(windows))]
+#[derive(Debug)]
+#[allow(dead_code)]
+struct ChildJobHandle;
+
 /// Everything needed to start `dsh web` for the managed connection mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnRequest {
@@ -68,6 +79,8 @@ pub struct DshChild {
     pid: u32,
     stdout_tail: SharedTail,
     stderr_tail: SharedTail,
+    /// Windows job keeping the tree alive exactly as long as this handle lives.
+    job: Option<ChildJobHandle>,
 }
 
 /// Launch failures.
@@ -215,6 +228,20 @@ pub fn spawn(request: &SpawnRequest, deadline: Duration) -> Result<ReadyDsh, Lau
         source,
     })?;
 
+    // Put the child in a kill-on-close job before anything else can go wrong.
+    // Running without it would mean an orphaned `dsh` whenever the shell dies
+    // without reaching `stop()`, so a failure here is a launch failure.
+    #[cfg(windows)]
+    let job = match crate::job::ChildJob::attach(&child) {
+        Ok(job) => Some(job),
+        Err(source) => {
+            terminate(&mut child, DEFAULT_STOP_GRACE);
+            return Err(LaunchError::Spawn { program, source });
+        }
+    };
+    #[cfg(not(windows))]
+    let job = None;
+
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         terminate(&mut child, DEFAULT_STOP_GRACE);
         return Err(LaunchError::Spawn {
@@ -247,7 +274,7 @@ pub fn spawn(request: &SpawnRequest, deadline: Duration) -> Result<ReadyDsh, Lau
                 if let Some(url) = parse_ready_line(&line) {
                     return Ok(ReadyDsh {
                         url,
-                        child: DshChild::new(child, stdout_tail, stderr_tail),
+                        child: DshChild::new(child, stdout_tail, stderr_tail, job),
                     });
                 }
                 if readiness_token(&line).is_some() {
@@ -342,13 +369,19 @@ fn tail_text(tail: &SharedTail) -> String {
 }
 
 impl DshChild {
-    fn new(child: Child, stdout_tail: SharedTail, stderr_tail: SharedTail) -> Self {
+    fn new(
+        child: Child,
+        stdout_tail: SharedTail,
+        stderr_tail: SharedTail,
+        job: Option<ChildJobHandle>,
+    ) -> Self {
         let pid = child.id();
         Self {
             child: Some(child),
             pid,
             stdout_tail,
             stderr_tail,
+            job,
         }
     }
 
@@ -370,9 +403,16 @@ impl DshChild {
     /// Asks the child to exit, then forces the whole process group after
     /// `grace`. Repeated calls after the first are no-ops.
     pub fn stop(&mut self, grace: Duration) {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            // Immediate and unconditional: a polite request comes next, but it
+            // is the job that guarantees the helpers go too.
+            job.terminate();
+        }
         if let Some(mut child) = self.child.take() {
             terminate(&mut child, grace);
         }
+        self.job = None;
     }
 }
 

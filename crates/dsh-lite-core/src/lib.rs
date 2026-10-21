@@ -10,6 +10,8 @@ pub mod config;
 pub mod console_text;
 pub mod dsh_locate;
 pub mod env_probe;
+#[cfg(windows)]
+pub mod job;
 pub mod launcher;
 pub mod logging;
 pub mod update;

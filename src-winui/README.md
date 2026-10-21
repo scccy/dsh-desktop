@@ -67,6 +67,17 @@ Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + 可选桌面快捷
 **只报告，不安装**：升级命令只展示与复制，真正的升级仍由用户自己的包管理器完成。
 本表与 Tauri 壳的菜单项共用同一份判定逻辑，不会有第二种"什么算更新"的定义。
 
+## 生命周期保障
+
+两条必须成立的保证，都用真实进程验证（`scripts/verify-shell-lifecycle.ps1`）：
+
+| 保证 | 机制 | 实测 |
+|---|---|---|
+| 只有一个壳、一个 `dsh` | 命名互斥量 `Local\dsh-desktop-single-instance` + 命名事件 `…-activate`；第二实例只负责把已有窗口提到前台然后退出 | 第二实例 284–556 ms 退出（码 0），shell 数 1、`dsh` 数 1 不变 |
+| 壳死了 `dsh` 也不留 | `dsh-lite-core` 在 Windows 上把子进程放进 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）；句柄随 `DshChild` 存活，壳怎么死都触发 | `Stop-Process -Force`（模拟崩溃、不跑任何退出钩子）后 `dsh` 在 2 s 内消失，无孤儿 |
+
+`src-tauri` 壳走同一个 `launcher`，因此这层保护对两个壳同时生效。
+
 ## 实测（Windows 11 build 26300，本机）
 
 | 指标 | 数值 | 备注 |
@@ -81,7 +92,7 @@ Inno Setup，per-user 安装（不弹 UAC）、开始菜单 + 可选桌面快捷
 对比：用 `Microsoft.WindowsAppSDK` 元包且不裁剪时是 **209 MB**（其中
 onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到）。
 
-## 四个必须知道的工程陷阱
+## 五个必须知道的工程陷阱
 
 1. **`dotnet publish` 会漏掉 `<assembly>.pri`。** 未打包 + 自包含的 WinUI 应用发布后
    缺资源索引，启动即 `0xC000027B`（stowed exception），**没有窗口、没有报错**。
@@ -97,7 +108,15 @@ onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到�
    一进 WebView2 就崩（`0xC000027B`，无任何提示）。改用文档化的环境变量
    `WEBVIEW2_USER_DATA_FOLDER`（在 `App` 构造函数里设，早于任何 WebView2 创建），
    不碰投影程序集。
-4. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
+4. **裁剪会删掉线程相关的框架程序集。** 单实例监听用 `System.Threading.Thread` /
+   `EventWaitHandle`，`PublishTrimmed` 会把 `System.Threading.Thread`、
+   `System.Threading.ThreadPool` 这类"只在特定 API 后面才用得到"的 facade 裁掉；
+   Debug 正常、裁剪后的发布版一进 `OnLaunched` 就 `FileNotFoundException`，
+   进程随后以 `0xC000027B` 结束。工程文件里用 `TrimmerRootAssembly` 把
+   `System.Threading`、`System.Threading.Thread`、`System.Threading.ThreadPool`
+   钉住（合计 112 KB）。**同理别在 `App` 构造函数里 `Environment.Exit`**：
+   XAML 还没初始化完就退出，同样会以 stowed exception 收场。
+5. **标题栏行默认是非客户区。** 放在标题栏里的菜单会出现"能拿到键盘焦点、能用空格
    展开，但鼠标点击落空"的假象——只做键盘自测会误判为正常。必须用
    `InputNonClientPointerSource.SetRegionRects(NonClientRegionKind.Passthrough, …)`
    把品牌区与菜单声明为可交互区，矩形是物理像素、相对窗口左上，尺寸 / DPI /
@@ -113,7 +132,8 @@ onnxruntime 20.7 MB + DirectML 17.8 MB 是 AI/ML 负载，本壳完全用不到�
 | 缺口 | 状态 |
 |---|---|
 | 托盘图标、全局快捷键 | WinUI 壳尚未实现，仍在 Tauri 壳里（标题栏菜单已实现，见上节） |
-| 单实例锁 | 未实现；多开会出现多个壳争用同一个 `dsh` |
+| 子进程跟随壳一起死 | **已实现**：`dsh-lite-core` 的 Job Object（`KILL_ON_JOB_CLOSE`），壳被强杀（真实崩溃路径）时 `dsh` 一并回收 |
+| 单实例锁 | **已实现**：命名互斥量 + 命名事件，第二次启动把已有窗口提到前台后自行退出（实测 ~300–500 ms，退出码 0，不会多起 `dsh`） |
 | 设置页写回 `config.toml` | 只读；`dsh_start` 的 `StartOptions` 已预留 profile / port |
 | profile 预检（`--dump-config`） | 未接；失败会落到 `ready` 错误页而不是 `profile` |
 | 登录 shell 环境探针 | 未接；Windows 直接继承环境，语义与 Tauri 壳一致 |

@@ -9,10 +9,17 @@ namespace DshDesktop.WinUI;
 public partial class App : Application
 {
     private Window? _window;
+    private readonly bool _isSecondary;
 
     public App()
     {
         InitializeComponent();
+
+        // A second launch must not start another dsh. The decision is made here
+        // but acted on in OnLaunched: calling Environment.Exit while the
+        // Application object is still being constructed tears XAML down and the
+        // process dies with a stowed exception instead of exiting cleanly.
+        _isSecondary = !SingleInstance.Acquire();
 
         // WebView2 defaults to a profile folder next to the executable, which
         // fails when the shell is installed somewhere read-only. The documented
@@ -31,10 +38,26 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (_isSecondary)
+        {
+            SingleInstance.SignalExisting();
+            Exit();
+            return;
+        }
+
         try
         {
-            _window = new MainWindow();
-            _window.Activate();
+            var window = new MainWindow();
+            _window = window;
+            window.Activate();
+
+            // A second launch brings this window forward instead of starting
+            // a second shell (see SingleInstance).
+            SingleInstance.Listen(() => window.DispatcherQueue.TryEnqueue(() =>
+            {
+                window.BringToFront();
+                _window.Activate();
+            }));
         }
         catch (Exception error)
         {

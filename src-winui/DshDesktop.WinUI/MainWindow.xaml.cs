@@ -455,6 +455,22 @@ public sealed partial class MainWindow : Window
         await dialog.ShowAsync();
     }
 
+    /// <summary>
+    /// Restores and activates the window; called when a second instance asks the
+    /// running shell to show itself.
+    /// </summary>
+    public void BringToFront()
+    {
+        if (AppWindow.Presenter is OverlappedPresenter presenter &&
+            presenter.State == OverlappedPresenterState.Minimized)
+        {
+            presenter.Restore();
+        }
+
+        AppWindow.Show();
+        Activate();
+    }
+
     private void OnClosed(object sender, WindowEventArgs args)
     {
         _bridge.Stop();

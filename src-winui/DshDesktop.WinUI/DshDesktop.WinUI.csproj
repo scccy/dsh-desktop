@@ -62,6 +62,18 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" />
   </ItemGroup>
 
+  <!--
+    Trimming keeps only what it can prove is used. These framework assemblies are
+    reached through types that the linker does not track (threads, wait handles),
+    and when one is dropped the app dies at startup with FileNotFoundException and
+    no message. Pinned so `SingleInstance` keeps working in the trimmed build.
+  -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="System.Threading.Thread" />
+    <TrimmerRootAssembly Include="System.Threading.ThreadPool" />
+    <TrimmerRootAssembly Include="System.Threading" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="$(DshFfiDirectory)dsh_ffi.dll"
           Link="dsh_ffi.dll"
