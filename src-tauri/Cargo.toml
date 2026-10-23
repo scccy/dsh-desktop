@@ -20,6 +20,11 @@ serde_json = "1"
 sys-locale = "0.3"
 toml = { workspace = true }
 url = { workspace = true }
-tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
+# `devtools` keeps `open_devtools` / `is_devtools_open` available in release
+# builds, which `window.devtools = true` needs (FR-8). Tauri gates those methods
+# on `any(debug_assertions, feature = "devtools")`, so without it a release
+# build fails to compile. It only enables the local DevTools panel; it does not
+# open a remote debugging port.
+tauri = { version = "2", features = ["tray-icon", "image-png", "unstable", "devtools"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
