@@ -189,20 +189,32 @@ fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::
     let config = state.config();
     let width = 1200.0;
     let height = 800.0;
+    let custom_title_bar = window::uses_custom_title_bar();
 
     let window = tauri::window::WindowBuilder::new(app, MAIN_WINDOW)
         .title(dsh_lite_core::PRODUCT_NAME)
         .inner_size(width, height)
         .min_inner_size(window::MIN_WIDTH as f64, window::MIN_HEIGHT as f64)
-        .decorations(false)
+        .decorations(!custom_title_bar)
         .visible(true)
         .build()?;
 
-    window.add_child(
-        tauri::webview::WebviewBuilder::new(HEADER_WEBVIEW, WebviewUrl::App("header.html".into())),
-        tauri::LogicalPosition::new(0.0, 0.0),
-        tauri::LogicalSize::new(width, window::HEADER_HEIGHT),
-    )?;
+    if custom_title_bar {
+        window.add_child(
+            tauri::webview::WebviewBuilder::new(
+                HEADER_WEBVIEW,
+                WebviewUrl::App("header.html".into()),
+            ),
+            tauri::LogicalPosition::new(0.0, 0.0),
+            tauri::LogicalSize::new(width, window::HEADER_HEIGHT),
+        )?;
+    }
+
+    let content_top = if custom_title_bar {
+        window::HEADER_HEIGHT
+    } else {
+        0.0
+    };
 
     let navigation_state = Arc::clone(state);
     let load_handle = app.clone();
@@ -237,8 +249,8 @@ fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::
                 connection::handle_page_load(&load_handle, payload.url());
             }
         }),
-        tauri::LogicalPosition::new(0.0, window::HEADER_HEIGHT),
-        tauri::LogicalSize::new(width, height - window::HEADER_HEIGHT),
+        tauri::LogicalPosition::new(0.0, content_top),
+        tauri::LogicalSize::new(width, height - content_top),
     )?;
 
     restore_geometry(&window, state, &config);
@@ -255,7 +267,11 @@ fn layout_webviews(window: &tauri::Window) {
     let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
         return;
     };
-    let header_height = window::header_height(scale).min(size.height as f64) as u32;
+    let header_height = if window::uses_custom_title_bar() {
+        window::header_height(scale).min(size.height as f64) as u32
+    } else {
+        0
+    };
     let content_height = size.height.saturating_sub(header_height);
     let app = window.app_handle();
 

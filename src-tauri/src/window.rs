@@ -38,6 +38,17 @@ pub fn header_height(scale: f64) -> f64 {
     (HEADER_HEIGHT * scale).round()
 }
 
+/// Whether this platform gets the shell's own title bar instead of the system one.
+///
+/// Windows and Linux draw the 40 DIP row. macOS keeps the system window: the
+/// traffic lights, the rounded corners, the zoom button and
+/// double-click-to-zoom are window-manager behaviour that a drawn row cannot
+/// reproduce, and the application menu already carries every action the header
+/// would offer — drawing one there would put the same entries on screen twice.
+pub const fn uses_custom_title_bar() -> bool {
+    !cfg!(target_os = "macos")
+}
+
 /// Smallest window the shell allows, matching the packaged minimum size.
 pub const MIN_WIDTH: u32 = 640;
 
