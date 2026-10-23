@@ -14,7 +14,8 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["English", "SimpChinese"]
+        "languages": ["English", "SimpChinese"],
+        "installerHooks": "installer-hooks.nsh"
       }
     },
     "macOS": {
