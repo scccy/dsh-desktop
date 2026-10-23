@@ -19,7 +19,7 @@
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
 | `src-ui/` 标题栏 + 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
 | Windows 安装包（Tauri bundler / NSIS） | 配置就位，未实测 |
-| 占位图标（`assets/`、`src-tauri/icons/`） | 已就位（正式设计稿是发布阻塞项） |
+| 图标（`assets/`、`src-tauri/icons/`、`src-ui/icon.png`） | 已换成正式设计稿（`assets/icon.png` 为 1024 透明圆角源，`scripts/render-icons.ps1` 派生各平台尺寸） |
 | 三平台 CI（fmt / clippy / test / release 构建） | 已就位 |
 | 发布流水线（tag 触发、三平台打包、SHA-256、可选签名） | 已就位（签名未接线，见 [docs/development.md](docs/development.md)） |
 | macOS / Linux 真机验收 | 未做 |
@@ -130,7 +130,7 @@ src-ui/                   # 零构建本地 HTML/CSS/JS
   error.html              # 错误页
   settings.html           # 设置页
   shell.css               # 三屏共用样式
-assets/                   # icon.svg 与三平台 1024×1024 占位 PNG
+assets/                   # icon.png（1024 透明圆角设计源）与 icon-macos.png（内缩版）
 scripts/                  # check.ps1 / check.sh / render-icons.ps1
 .github/workflows/        # ci.yml（三平台校验）/ release.yml（tag 发布）
 docs/                     # 架构与开发文档

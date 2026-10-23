@@ -45,7 +45,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 pwsh -File scripts/check.ps1     # Windows：fmt --check → clippy → test
 ./scripts/check.sh               # Linux / macOS：同上
 
-pwsh -File scripts/render-icons.ps1   # 重新生成占位图标（assets/ + src-tauri/icons/）
+pwsh -File scripts/render-icons.ps1   # 从 assets/icon.png 派生各平台图标（src-tauri/icons/ + src-ui/icon.png）
 cargo tauri dev                       # 需要 tauri-cli：cargo install tauri-cli --version "^2" --locked
 cargo tauri build --config src-tauri/tauri.release.conf.json
 ```
@@ -122,7 +122,7 @@ cargo tauri build --config src-tauri/tauri.release.conf.json --bundles nsis
 - **发布产物只认 MSVC**（见 §6.1）：GNU 工具链能跑 `cargo build` 与测试，但打包、签名、WebView2 的运行时假设都以 MSVC 为准；
 - 安装形态由 `tauri.release.conf.json` 决定：`nsis.installMode = currentUser`（默认装到用户目录、不弹 UAC）、语言 `English` + `SimpChinese`；
 - WebView2 不随包携带：`webviewInstallMode = downloadBootstrapper`，系统缺 WebView2 时安装器联网引导；
-- 图标来自 `src-tauri/icons/`（`icon.ico` 由 `scripts/render-icons.ps1` 从 `assets/icon.svg` 生成）；
+- 图标来自 `src-tauri/icons/`：`assets/icon.png` 是唯一设计源（1024、圆角已烘焙进 alpha），`scripts/render-icons.ps1` 从它派生 `32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` 与标题栏用的 `src-ui/icon.png`；`assets/icon-macos.png` 是内缩 8% 的 macOS 版本；
 - **未签名**：SmartScreen 会提示未知发布者；签名点位见 §4.3；
 - 出包后手动启动一次，确认三屏与 `dsh web` 都能加载（流水线不内置冒烟检查）。
 
