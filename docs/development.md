@@ -191,7 +191,8 @@ mac 落地时的阻塞项：
 - **应用**：打开设置 / 重试连接（`Ctrl+Shift+L`）/ 打开日志目录 / 检查 dsh 更新… / 退出（`Ctrl+Q`）；
 - **视图**：刷新页面（`Ctrl+R`）/ 关于 dsh desktop；
 - 「重试连接」重跑整条启动链（停掉 `dsh` 再起，`connection::restart`），「刷新页面」只让 `content` webview 重新加载当前 URL（`Webview::reload`）——两者不可混淆；
-- 菜单是**原生 popup**（`Menu::popup_at`），不是 HTML 下拉：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉。菜单项里的快捷键只是右侧的提示文字，真正处理按键的是 `shortcuts.rs`；
+- 菜单是**原生 popup**（`Menu::popup_at`），不是 HTML 下拉：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉；
+- **快捷键只在壳自己的页面里生效**（加载 / 错误 / 设置）：Tauri 不向远程页面注入 IPC，`http://127.0.0.1:<port>` 上的 `dsh` 页面拿不到 `__TAURI_INTERNALS__`，`shortcuts.rs` 的监听脚本会直接返回。这是有意的安全边界（壳不把命令面暴露给被承载的页面），代价是菜单里显示的 `Ctrl+Shift+L` / `Ctrl+Q` 在 `dsh` 页面内按不出效果——同样两件事要点菜单。`Ctrl+R` 例外：WebView2 自己会重载页面，与「刷新页面」等效；
 - macOS 不受影响：应用菜单的 Edit 子菜单走 AppKit responder chain，是真正的原生编辑。
 
 ## 7. 提交前的最小检查

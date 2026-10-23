@@ -220,6 +220,20 @@ fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::
                 dsh_lite_core::url_policy::redact_url(payload.url().as_str())
             ));
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                // The shortcut listener lives inside the page, so every
+                // navigation drops it: re-install on each finished load
+                // instead of once at startup.
+                if let Some(state) = load_handle.try_state::<Arc<AppState>>() {
+                    let allowed = cfg!(debug_assertions) || state.config().window.devtools;
+                    if allowed
+                        && let Some(content) = load_handle.get_webview(CONTENT_WEBVIEW)
+                        && let Err(error) = shortcuts::install(&content)
+                    {
+                        state.logger.warn(&format!(
+                            "could not install the keyboard shortcuts: {error}"
+                        ));
+                    }
+                }
                 connection::handle_page_load(&load_handle, payload.url());
             }
         }),
@@ -852,7 +866,13 @@ fn shell_shortcut(
                 }
             }
         }
-        shortcuts::ShortcutAction::Reload => connection::restart(&app, state),
+        // Same action as the menu's 刷新页面 entry: reload the page, not the
+        // connection. Restarting `dsh` is 重试连接, which has its own entry.
+        shortcuts::ShortcutAction::Reload => {
+            if let Some(content) = app.get_webview(CONTENT_WEBVIEW) {
+                let _ = content.reload();
+            }
+        }
         shortcuts::ShortcutAction::ConnectionPanel => {
             let base = state.runtime().local_base.clone();
             connection::navigate_shell_page(&app, base.as_ref(), "settings.html", &[]);
