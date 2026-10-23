@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>dsh desktop</title>
+    <link rel="stylesheet" href="header.css" />
+  </head>
+  <body>
+    <div class="bar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">d</span>
+        <span class="title">dsh desktop</span>
+      </div>
+
+      <div class="menus">
+        <button type="button" class="menu" data-menu="app">应用</button>
+        <button type="button" class="menu" data-menu="view">视图</button>
+      </div>
+
+      <div class="drag" data-drag="1"></div>
+
+      <div class="caption">
+        <button type="button" class="cap" data-action="minimize" title="最小化" aria-label="最小化">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" /></svg>
+        </button>
+        <button type="button" class="cap" data-action="toggle-maximize" title="最大化" aria-label="最大化">
+          <svg class="glyph-max" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" rx="1" /></svg>
+          <svg class="glyph-restore" viewBox="0 0 10 10" aria-hidden="true">
+            <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
+            <path d="M2.5 2.5V1.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" />
+          </svg>
+        </button>
+        <button type="button" class="cap close" data-action="close" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" /></svg>
+        </button>
+      </div>
+    </div>
+    <script src="header.js"></script>
+  </body>
+</html>

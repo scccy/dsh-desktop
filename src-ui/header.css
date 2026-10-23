@@ -1,0 +1,160 @@
+/* The shell's title bar: one 40 DIP row above the content webview.
+   Its fill matches the dsh page sidebar (#f9fafb / #17181b) so the two read as
+   one surface instead of two headers stacked on top of each other. */
+
+:root {
+  color-scheme: light dark;
+  --bar-bg: #f9fafb;
+  --bar-line: rgba(0, 0, 0, 0.07);
+  --fg: #1c1f23;
+  --fg-muted: #444a53;
+  --hover: rgba(0, 0, 0, 0.055);
+  --accent: #2f6feb;
+  --close-hover: #c42b1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bar-bg: #17181b;
+    --bar-line: rgba(255, 255, 255, 0.08);
+    --fg: #e8eaee;
+    --fg-muted: #b6bcc6;
+    --hover: rgba(255, 255, 255, 0.07);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bar-bg);
+  color: var(--fg);
+  font-family: system-ui, "Segoe UI Variable Text", "Segoe UI",
+    "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  border-bottom: 1px solid var(--bar-line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  flex: none;
+}
+
+.mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+
+.title {
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.menus {
+  display: flex;
+  gap: 2px;
+  margin-left: 16px;
+  flex: none;
+}
+
+.menu {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 9px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.menu:hover,
+.menu[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.drag {
+  flex: 1 1 auto;
+  height: 100%;
+  min-width: 24px;
+}
+
+.caption {
+  display: flex;
+  height: 100%;
+  flex: none;
+}
+
+.cap {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  cursor: default;
+  padding: 0;
+}
+
+.cap svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cap:hover {
+  background: var(--hover);
+}
+
+.cap.close:hover {
+  background: var(--close-hover);
+  color: #fff;
+}
+
+.glyph-restore {
+  display: none;
+}
+
+body.maximized .glyph-max {
+  display: none;
+}
+
+body.maximized .glyph-restore {
+  display: block;
+}

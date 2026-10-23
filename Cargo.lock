@@ -843,16 +843,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsh-ffi"
-version = "0.1.0"
-dependencies = [
- "dsh-lite-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "dsh-lite-core"
 version = "0.1.0"
 dependencies = [

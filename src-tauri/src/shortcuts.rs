@@ -9,8 +9,6 @@
 //! `window.devtools = true`); a release build otherwise injects no script into
 //! the `dsh web` page at all.
 
-use tauri::WebviewWindow;
-
 use dsh_lite_core::config::Platform;
 
 /// What a recognised chord asks the shell to do.
@@ -115,9 +113,9 @@ pub const LISTENER_SCRIPT: &str = r#"(function () {
   }, true);
 })();"#;
 
-/// Attaches the key listener to `window`.
-pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
-    window.eval(LISTENER_SCRIPT)
+/// Attaches the key listener to `webview`.
+pub fn install(webview: &tauri::Webview) -> tauri::Result<()> {
+    webview.eval(LISTENER_SCRIPT)
 }
 
 #[cfg(test)]

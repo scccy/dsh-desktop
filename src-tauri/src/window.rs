@@ -21,6 +21,23 @@ use dsh_lite_core::url_policy::{is_loopback_http, redact_url, shares_target, tok
 /// Label of the single main window.
 pub const MAIN_WINDOW: &str = "main";
 
+/// Label of the child webview that draws the shell's own title bar.
+pub const HEADER_WEBVIEW: &str = "header";
+
+/// Label of the child webview that hosts `dsh web` and the shell's pages.
+pub const CONTENT_WEBVIEW: &str = "content";
+
+/// Height of the shell's title bar, in logical pixels.
+///
+/// The WinUI shell used 40 DIP for the same row; keeping the number means a
+/// window restored by one shell lines up in the other.
+pub const HEADER_HEIGHT: f64 = 40.0;
+
+/// Height of the title bar in physical pixels for a given scale factor.
+pub fn header_height(scale: f64) -> f64 {
+    (HEADER_HEIGHT * scale).round()
+}
+
 /// Smallest window the shell allows, matching the packaged minimum size.
 pub const MIN_WIDTH: u32 = 640;
 

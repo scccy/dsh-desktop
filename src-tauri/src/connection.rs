@@ -34,6 +34,12 @@ use crate::window::{PageOutcome, classify_page_load};
 /// How long the shell waits for the redirect that consumes the token.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long the first load of the token URL gets before it is tried again.
+///
+/// A cold `dsh` start prints its ready line the moment the port is taken, so
+/// the first request can arrive before the server answers.
+const AUTH_RETRY_AFTER: Duration = Duration::from_secs(8);
+
 /// Deadline for the short `dsh --version` and `node --version` probes.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -443,8 +449,8 @@ pub fn navigate_token_url(app: &AppHandle, state: &Arc<AppState>, url: Url) {
         .logger
         .info(&format!("loading {}", redact_url(url.as_str())));
 
-    if let Some(window) = app.get_webview_window(crate::window::MAIN_WINDOW)
-        && let Err(error) = window.navigate(url.clone())
+    if let Some(content) = app.get_webview(crate::window::CONTENT_WEBVIEW)
+        && let Err(error) = content.navigate(url.clone())
     {
         fail(
             app,
@@ -461,15 +467,28 @@ pub fn navigate_token_url(app: &AppHandle, state: &Arc<AppState>, url: Url) {
 /// [`AUTH_TIMEOUT`], which covers a page that never reported a finished load.
 fn arm_auth_watchdog(app: AppHandle, state: Arc<AppState>, watched: Url) {
     thread::spawn(move || {
-        thread::sleep(AUTH_TIMEOUT);
-        let still_pending = {
-            let runtime = state.runtime();
-            runtime
-                .pending_auth
-                .as_ref()
-                .is_some_and(|pending| dsh_lite_core::url_policy::shares_target(pending, &watched))
-        };
-        if still_pending {
+        thread::sleep(AUTH_RETRY_AFTER);
+        if !auth_still_pending(&state, &watched) {
+            return;
+        }
+        // `dsh web:` is printed as soon as the server claims the port, so the
+        // very first request can still race the listener on a cold start and
+        // never report a finished load. Loading the same token URL again is
+        // harmless: the token is consumed at most once, and a page that did
+        // authenticate cleared `pending_auth` before this line.
+        state
+            .logger
+            .warn("no page load was reported for the token URL; loading it once more");
+        if let Some(content) = app.get_webview(crate::window::CONTENT_WEBVIEW)
+            && let Err(error) = content.navigate(watched.clone())
+        {
+            state
+                .logger
+                .warn(&format!("the second attempt could not start: {error}"));
+        }
+
+        thread::sleep(AUTH_TIMEOUT - AUTH_RETRY_AFTER);
+        if auth_still_pending(&state, &watched) {
             auth_failure(
                 &app,
                 &state,
@@ -477,6 +496,15 @@ fn arm_auth_watchdog(app: AppHandle, state: Arc<AppState>, watched: Url) {
             );
         }
     });
+}
+
+/// Whether the token of `watched` is still waiting to be consumed.
+fn auth_still_pending(state: &Arc<AppState>, watched: &Url) -> bool {
+    let runtime = state.runtime();
+    runtime
+        .pending_auth
+        .as_ref()
+        .is_some_and(|pending| dsh_lite_core::url_policy::shares_target(pending, watched))
 }
 
 /// Applies the FR-3 decision to a finished page load.
@@ -566,12 +594,19 @@ pub fn navigate_shell_page(
     page: &str,
     query: &[(&str, &str)],
 ) {
+    // Leaving for a page the shell owns abandons whatever token handshake was
+    // in flight. Without this, a user who opens the settings page while `dsh`
+    // is still starting would be told authentication failed twenty seconds
+    // later — for a page they navigated away from on purpose.
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.runtime().pending_auth = None;
+    }
     let base = base
         .cloned()
         .unwrap_or_else(crate::window::default_shell_base);
     let url = crate::window::shell_page_url_with_query(&base, page, query);
-    match app.get_webview_window(crate::window::MAIN_WINDOW) {
-        Some(window) => match window.navigate(url.clone()) {
+    match app.get_webview(crate::window::CONTENT_WEBVIEW) {
+        Some(content) => match content.navigate(url.clone()) {
             Ok(()) => state_free_log(app, LogLevel::Debug, &format!("showing {url}")),
             Err(error) => state_free_log(
                 app,
@@ -632,7 +667,7 @@ fn version_floor() -> String {
 /// Output is redirected to a temporary file rather than a pipe: a probe that
 /// floods its pipe while the shell only waits for exit would otherwise block
 /// forever, and a file also keeps the wait bounded by the deadline.
-fn run_capture(
+pub(crate) fn run_capture(
     command: &DshCommand,
     args: &[String],
     timeout: Duration,
@@ -688,9 +723,9 @@ fn run_capture(
 }
 
 /// Result of one probe command.
-struct Capture {
-    code: i32,
-    output: String,
+pub(crate) struct Capture {
+    pub(crate) code: i32,
+    pub(crate) output: String,
 }
 
 /// Distinguishes temporary files of concurrent probes in one process.

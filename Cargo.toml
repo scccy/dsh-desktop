@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/dsh-lite-core", "crates/dsh-ffi", "src-tauri"]
+members = ["crates/dsh-lite-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,10 +22,3 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
-
-# The FFI library is not the shipped binary: it is loaded by a native shell, so a
-# panic must not unwind into foreign code and the surface is small enough that
-# size optimisation costs nothing visible. Everything else matches `release`.
-[profile.ffi-release]
-inherits = "release"
-panic = "abort"

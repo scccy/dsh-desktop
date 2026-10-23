@@ -18,12 +18,13 @@ mod window;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
+use tauri::menu::{ContextMenu, MenuBuilder, MenuItemBuilder};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
+use tauri_plugin_dialog::DialogExt;
 use url::Url;
 
 use dsh_lite_core::cli::{CliAction, RunOptions};
@@ -33,7 +34,7 @@ use dsh_lite_core::logging::Logger;
 use crate::connection::ErrorKind;
 use crate::lifecycle::effective_close_action;
 use crate::state::{AppState, WINDOW_STATE_FILE};
-use crate::window::{MAIN_WINDOW, MonitorRect};
+use crate::window::{CONTENT_WEBVIEW, HEADER_WEBVIEW, MAIN_WINDOW, MonitorRect};
 
 /// Exit code used when the configuration cannot be read.
 const EXIT_CONFIGURATION: i32 = 1;
@@ -117,6 +118,7 @@ fn run(options: RunOptions) {
         ))
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&state))
+        .on_menu_event(|app, event| run_menu_entry(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
             shell_info,
             save_settings,
@@ -125,7 +127,15 @@ fn run(options: RunOptions) {
             use_web_profile,
             return_to_app,
             shell_shortcut,
-            open_external_link
+            open_external_link,
+            shell_window_action,
+            shell_drag,
+            shell_window_state,
+            shell_menu,
+            shell_check_update,
+            shell_about,
+            open_settings,
+            quit_shell
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -168,28 +178,81 @@ fn open_logger(dir: &Path, config: &Config, options: &RunOptions) -> Logger {
     }
 }
 
-/// Creates the single main window on the loading page.
-fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<WebviewWindow> {
+/// Creates the single main window with its two child webviews.
+///
+/// The window owns no webview of its own: a 40 DIP `header` webview draws the
+/// shell's title bar, and a `content` webview below it hosts either a shell
+/// page or the connected `dsh web`. Splitting them is what lets the title bar
+/// stay put while the content navigates, without injecting anything into the
+/// `dsh` page.
+fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::Window> {
     let config = state.config();
+    let width = 1200.0;
+    let height = 800.0;
+
+    let window = tauri::window::WindowBuilder::new(app, MAIN_WINDOW)
+        .title(dsh_lite_core::PRODUCT_NAME)
+        .inner_size(width, height)
+        .min_inner_size(window::MIN_WIDTH as f64, window::MIN_HEIGHT as f64)
+        .decorations(false)
+        .visible(true)
+        .build()?;
+
+    window.add_child(
+        tauri::webview::WebviewBuilder::new(HEADER_WEBVIEW, WebviewUrl::App("header.html".into())),
+        tauri::LogicalPosition::new(0.0, 0.0),
+        tauri::LogicalSize::new(width, window::HEADER_HEIGHT),
+    )?;
 
     let navigation_state = Arc::clone(state);
     let load_handle = app.clone();
-    let builder =
-        WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("loading.html".into()))
-            .title(dsh_lite_core::PRODUCT_NAME)
-            .inner_size(1200.0, 800.0)
-            .min_inner_size(window::MIN_WIDTH as f64, window::MIN_HEIGHT as f64)
-            .visible(true)
-            .on_navigation(move |url| handle_navigation(&navigation_state, url))
-            .on_page_load(move |_window, payload| {
-                if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                    connection::handle_page_load(&load_handle, payload.url());
-                }
-            });
+    let log_state = Arc::clone(state);
+    window.add_child(
+        tauri::webview::WebviewBuilder::new(
+            CONTENT_WEBVIEW,
+            WebviewUrl::App("loading.html".into()),
+        )
+        .on_navigation(move |url| handle_navigation(&navigation_state, url))
+        .on_page_load(move |_webview, payload| {
+            log_state.logger.debug(&format!(
+                "content page load: {:?} {}",
+                payload.event(),
+                dsh_lite_core::url_policy::redact_url(payload.url().as_str())
+            ));
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                connection::handle_page_load(&load_handle, payload.url());
+            }
+        }),
+        tauri::LogicalPosition::new(0.0, window::HEADER_HEIGHT),
+        tauri::LogicalSize::new(width, height - window::HEADER_HEIGHT),
+    )?;
 
-    let window = builder.build()?;
     restore_geometry(&window, state, &config);
+    layout_webviews(&window);
     Ok(window)
+}
+
+/// Places the header and content webviews inside the window's client area.
+///
+/// Every size change has to come through here: child webviews keep the size
+/// they were built with, so a resize or a DPI change would otherwise leave the
+/// content stuck at its original rectangle.
+fn layout_webviews(window: &tauri::Window) {
+    let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return;
+    };
+    let header_height = window::header_height(scale).min(size.height as f64) as u32;
+    let content_height = size.height.saturating_sub(header_height);
+    let app = window.app_handle();
+
+    if let Some(header) = app.get_webview(HEADER_WEBVIEW) {
+        let _ = header.set_position(PhysicalPosition::new(0, 0));
+        let _ = header.set_size(PhysicalSize::new(size.width, header_height));
+    }
+    if let Some(content) = app.get_webview(CONTENT_WEBVIEW) {
+        let _ = content.set_position(PhysicalPosition::new(0, header_height as i32));
+        let _ = content.set_size(PhysicalSize::new(size.width, content_height));
+    }
 }
 
 /// Decides whether a navigation stays in the window or leaves for the browser.
@@ -217,7 +280,7 @@ fn handle_navigation(state: &Arc<AppState>, url: &Url) -> bool {
 }
 
 /// Applies the remembered geometry, corrected against the connected monitors.
-fn restore_geometry(window: &WebviewWindow, state: &Arc<AppState>, config: &Config) {
+fn restore_geometry(window: &tauri::Window, state: &Arc<AppState>, config: &Config) {
     if !config.window.remember_bounds || state.cli.reset_window {
         let _ = window.center();
         return;
@@ -239,7 +302,7 @@ fn restore_geometry(window: &WebviewWindow, state: &Arc<AppState>, config: &Conf
 }
 
 /// Monitor rectangles of the current desktop, used for the boundary correction.
-fn monitors(window: &WebviewWindow) -> Vec<MonitorRect> {
+fn monitors(window: &tauri::Window) -> Vec<MonitorRect> {
     let Ok(list) = window.available_monitors() else {
         return Vec::new();
     };
@@ -261,15 +324,17 @@ fn monitors(window: &WebviewWindow) -> Vec<MonitorRect> {
 fn install_shell_chrome(
     app: &AppHandle,
     state: &Arc<AppState>,
-    window: &WebviewWindow,
+    _window: &tauri::Window,
 ) -> tauri::Result<()> {
     let config = state.config();
     platform::install_shell_entry(app)?;
 
     // A release build injects nothing into the page unless the configuration
-    // opts in, which is also what makes DevTools reachable.
+    // opts in, which is also what makes DevTools reachable. The listener goes
+    // to the content webview only: the header has no user content to protect.
     if (cfg!(debug_assertions) || config.window.devtools)
-        && let Err(error) = shortcuts::install(window)
+        && let Some(content) = app.get_webview(CONTENT_WEBVIEW)
+        && let Err(error) = shortcuts::install(&content)
     {
         state.logger.warn(&format!(
             "could not install the keyboard shortcuts: {error}"
@@ -279,7 +344,7 @@ fn install_shell_chrome(
 }
 
 /// Connects the window's close, move and resize events to the shell.
-fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
+fn attach_window_events(app: &AppHandle, window: &tauri::Window) {
     let handle = app.clone();
     let window_clone = window.clone();
     window.on_window_event(move |event| {
@@ -298,7 +363,11 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
                     CloseAction::Quit => lifecycle::quit(&handle),
                 }
             }
-            tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
+            tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                layout_webviews(&window_clone);
+                lifecycle::remember_layout(&handle, &window_clone);
+            }
+            tauri::WindowEvent::Moved(_) => {
                 lifecycle::remember_layout(&handle, &window_clone);
             }
             _ => {}
@@ -447,6 +516,266 @@ fn open_logs(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     window::open_path(&state.log_dir).map_err(|error| error.to_string())
 }
 
+/// What the shell's own title bar can ask the window to do.
+///
+/// The requests come from `header.html`, which is a page shipped with the
+/// shell; the `dsh` page never sees them.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WindowAction {
+    Minimize,
+    ToggleMaximize,
+    Close,
+}
+
+#[tauri::command]
+fn shell_window_action(app: AppHandle, action: WindowAction) {
+    let Some(window) = app.get_window(MAIN_WINDOW) else {
+        return;
+    };
+    match action {
+        WindowAction::Minimize => {
+            let _ = window.minimize();
+        }
+        WindowAction::ToggleMaximize => {
+            let maximized = window.is_maximized().unwrap_or(false);
+            let _ = if maximized {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            };
+        }
+        WindowAction::Close => {
+            // Goes through `CloseRequested`, so `window.closeAction` decides
+            // between hiding and quitting exactly as the caption button does.
+            let _ = window.close();
+        }
+    }
+}
+
+/// Starts a window drag from the title bar's empty strip.
+#[tauri::command]
+fn shell_drag(app: AppHandle) {
+    if let Some(window) = app.get_window(MAIN_WINDOW) {
+        let _ = window.start_dragging();
+    }
+}
+
+/// Whether the window is maximized, so the title bar can draw the right glyph.
+#[tauri::command]
+fn shell_window_state(app: AppHandle) -> bool {
+    app.get_window(MAIN_WINDOW)
+        .and_then(|window| window.is_maximized().ok())
+        .unwrap_or(false)
+}
+
+/// Shows the settings page without touching the connection.
+#[tauri::command]
+fn open_settings(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    let base = state.runtime().local_base.clone();
+    connection::navigate_shell_page(&app, base.as_ref(), "settings.html", &[]);
+}
+
+/// Ids of the entries in the title bar's popup menus.
+const MENU_SETTINGS: &str = "shell:settings";
+const MENU_RECONNECT: &str = "shell:reconnect";
+const MENU_LOGS: &str = "shell:logs";
+const MENU_UPDATE: &str = "shell:update";
+const MENU_QUIT: &str = "shell:quit";
+const MENU_RELOAD: &str = "shell:reload";
+const MENU_ABOUT: &str = "shell:about";
+
+/// Deadline for the `npm view` probe behind an update check.
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds one popup menu entry, optionally showing its shortcut on the right.
+///
+/// The accelerators are display-only here: the shortcuts themselves are
+/// handled in `shortcuts.rs`, so a popup that never becomes a menu bar still
+/// lists the same keys the shell actually listens for.
+fn menu_item<R: tauri::Runtime>(
+    manager: &impl Manager<R>,
+    id: &'static str,
+    text: &str,
+    accelerator: Option<&str>,
+) -> Result<tauri::menu::MenuItem<R>, String> {
+    let builder = MenuItemBuilder::with_id(id, text);
+    let builder = match accelerator {
+        Some(accelerator) => builder.accelerator(accelerator),
+        None => builder,
+    };
+    builder
+        .build(manager)
+        .map_err(|error| error.to_string())
+}
+
+/// Pops a menu anchored under the title bar button that asked for it.
+///
+/// The menu is a native popup rather than HTML inside the header webview: the
+/// header is only 40 DIP tall, so anything drawn below its edge would be
+/// clipped by the webview rectangle.
+#[tauri::command]
+fn shell_menu(app: AppHandle, menu: String, x: f64, y: f64) -> Result<(), String> {
+    let Some(window) = app.get_window(MAIN_WINDOW) else {
+        return Ok(());
+    };
+    let built = match menu.as_str() {
+        "app" => MenuBuilder::new(&app)
+            .item(&menu_item(&app, MENU_SETTINGS, "打开设置…", None)?)
+            .item(&menu_item(
+                &app,
+                MENU_RECONNECT,
+                "重试连接",
+                Some("CmdOrCtrl+Shift+L"),
+            )?)
+            .item(&menu_item(&app, MENU_LOGS, "打开日志目录", None)?)
+            .item(&menu_item(&app, MENU_UPDATE, "检查 dsh 更新…", None)?)
+            .separator()
+            .item(&menu_item(
+                &app,
+                MENU_QUIT,
+                "退出",
+                Some("CmdOrCtrl+Q"),
+            )?)
+            .build()
+            .map_err(|error| error.to_string()),
+        "view" => MenuBuilder::new(&app)
+            .item(&menu_item(
+                &app,
+                MENU_RELOAD,
+                "刷新页面",
+                Some("CmdOrCtrl+R"),
+            )?)
+            .separator()
+            .item(&menu_item(&app, MENU_ABOUT, "关于 dsh desktop", None)?)
+            .build()
+            .map_err(|error| error.to_string()),
+        other => return Err(format!("unknown menu {other:?}")),
+    };
+    built.and_then(|menu| {
+        menu.popup_at(window, tauri::LogicalPosition::new(x, y))
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Carries out one of the title bar's menu entries.
+fn run_menu_entry(app: &AppHandle, id: &str) {
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.logger.info(&format!("menu entry {id}"));
+    }
+    match id {
+        MENU_SETTINGS => {
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                let base = state.runtime().local_base.clone();
+                connection::navigate_shell_page(app, base.as_ref(), "settings.html", &[]);
+            }
+        }
+        MENU_RECONNECT => {
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                connection::restart(app, state.inner());
+            }
+        }
+        MENU_LOGS => {
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                if let Err(error) = window::open_path(&state.log_dir) {
+                    state
+                        .logger
+                        .warn(&format!("could not open the log directory: {error}"));
+                }
+            }
+        }
+        MENU_UPDATE => check_update(app),
+        MENU_RELOAD => {
+            if let Some(content) = app.get_webview(CONTENT_WEBVIEW) {
+                let _ = content.reload();
+            }
+        }
+        MENU_ABOUT => show_about(app),
+        MENU_QUIT => lifecycle::quit(app),
+        _ => {}
+    }
+}
+
+/// Asks npm for the published `dsh` version and reports it in a dialog.
+///
+/// Nothing is installed: the upgrade command is shown so the user can run it
+/// with their own package manager, exactly as the requirement document says.
+fn check_update(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return;
+    };
+    let state = Arc::clone(state.inner());
+    let handle = app.clone();
+    thread::spawn(move || {
+        let installed = state.runtime().dsh.version.clone();
+        let (program, prefix) = platform::shell_program("npm");
+        let npm = dsh_lite_core::dsh_locate::DshCommand::new(program, prefix);
+        let args = vec![
+            "view".to_owned(),
+            dsh_lite_core::update::PACKAGE.to_owned(),
+            "version".to_owned(),
+        ];
+        state.logger.info(&format!(
+            "checking {} with npm view",
+            dsh_lite_core::update::PACKAGE
+        ));
+
+        let message = match connection::run_capture(&npm, &args, UPDATE_TIMEOUT) {
+            Ok(capture) => match dsh_lite_core::update::interpret(
+                &capture.output,
+                capture.code,
+                installed.as_deref(),
+            ) {
+                Ok(outcome) if outcome.newer => format!(
+                    "有新版本：{}\n当前安装：{}\n\n升级命令（只展示，不会自动执行）：\n{}",
+                    outcome.latest,
+                    outcome.installed.as_deref().unwrap_or("未知"),
+                    dsh_lite_core::update::UPGRADE_COMMAND
+                ),
+                Ok(outcome) => format!("已是最新版本：{}", outcome.latest),
+                Err(error) => format!("无法判断版本：{error}"),
+            },
+            Err(error) => format!("检查失败：{error}"),
+        };
+        state.logger.info(&format!("update check: {message}"));
+        handle
+            .dialog()
+            .message(message)
+            .title("检查 dsh 更新")
+            .show(|_| {});
+    });
+}
+
+/// Shows the product name and version.
+fn show_about(app: &AppHandle) {
+    app.dialog()
+        .message(format!(
+            "{} {}\n\n轻量原生外壳：不自带运行时，只负责启动并承载本机已安装的 dsh web。",
+            dsh_lite_core::PRODUCT_NAME,
+            dsh_lite_core::VERSION
+        ))
+        .title("关于 dsh desktop")
+        .show(|_| {});
+}
+
+/// Update check reachable from a page (the title bar uses the same path).
+#[tauri::command]
+fn shell_check_update(app: AppHandle) {
+    check_update(&app);
+}
+
+/// About dialog reachable from a page.
+#[tauri::command]
+fn shell_about(app: AppHandle) {
+    show_about(&app);
+}
+
+/// Quits the shell, stopping a sponsored `dsh` first.
+#[tauri::command]
+fn quit_shell(app: AppHandle) {
+    lifecycle::quit(&app);
+}
+
 #[tauri::command]
 fn retry_connection(app: AppHandle, state: State<'_, Arc<AppState>>) {
     connection::restart(&app, state.inner());
@@ -476,10 +805,10 @@ fn return_to_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), 
         .map(|connection| connection.web_url.clone());
     match target {
         Some(url) => {
-            let window = app
-                .get_webview_window(MAIN_WINDOW)
+            let content = app
+                .get_webview(CONTENT_WEBVIEW)
                 .ok_or_else(|| "the main window is closed".to_owned())?;
-            window.navigate(url).map_err(|error| error.to_string())
+            content.navigate(url).map_err(|error| error.to_string())
         }
         None => {
             connection::restart(&app, state);
@@ -515,11 +844,11 @@ fn shell_shortcut(
         .debug(&format!("shortcut {} requested", action.as_str()));
     match action {
         shortcuts::ShortcutAction::ToggleDevTools => {
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                if window.is_devtools_open() {
-                    window.close_devtools();
+            if let Some(content) = app.get_webview(CONTENT_WEBVIEW) {
+                if content.is_devtools_open() {
+                    content.close_devtools();
                 } else {
-                    window.open_devtools();
+                    content.open_devtools();
                 }
             }
         }

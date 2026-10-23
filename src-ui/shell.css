@@ -1,32 +1,43 @@
-/* Shared styling for the three pages the shell itself renders.
-   No fonts, images or scripts are loaded from anywhere but this directory. */
+/* Styling for the three pages the shell itself renders, matching the WinUI 3
+   shell this replaced: left-aligned large title, grouped sections, one row of
+   Fluent buttons, and a very light background that continues the title bar's
+   fill at the top edge. No fonts, images or scripts are loaded from anywhere
+   but this directory. */
 
 :root {
   color-scheme: light dark;
-  --bg: #f6f7f9;
-  --card: #ffffff;
-  --fg: #1c1f23;
-  --muted: #5a6270;
-  --line: #dfe3e9;
-  --accent: #2f6feb;
+  --bg: #f9fafb;
+  --bg-wash: linear-gradient(160deg, #f9fafb 0%, #f5f7f9 42%, #f6f8f6 72%, #fbf8f9 100%);
+  --fg: #1b1b1b;
+  --muted: #616161;
+  --line: rgba(0, 0, 0, 0.08);
+  --line-strong: rgba(0, 0, 0, 0.14);
+  --control-bg: #ffffff;
+  --control-bg-hover: #f5f5f5;
+  --detail-bg: rgba(255, 255, 255, 0.72);
+  --accent: #0f6cbd;
+  --accent-hover: #115ea3;
   --accent-fg: #ffffff;
-  --danger: #c0392b;
-  --ok: #1f8b4c;
-  --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  --danger: #c42b1c;
+  --ok: #0f7b0f;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181c;
-    --card: #1f2229;
-    --fg: #e8eaee;
-    --muted: #9aa3b2;
-    --line: #2f343d;
-    --accent: #5b8bff;
+    --bg: #17181b;
+    --bg-wash: linear-gradient(160deg, #17181b 0%, #16181a 48%, #191719 100%);
+    --fg: #f0f0f0;
+    --muted: #a0a0a0;
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --control-bg: #2b2b2b;
+    --control-bg-hover: #323232;
+    --detail-bg: rgba(255, 255, 255, 0.04);
+    --accent: #479ef5;
+    --accent-hover: #62abf5;
     --accent-fg: #0b1020;
-    --danger: #ff6b5e;
-    --ok: #4ac27b;
-    --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    --danger: #ff99a4;
+    --ok: #6ccb5f;
   }
 }
 
@@ -36,124 +47,133 @@
 
 html,
 body {
-  height: 100%;
+  min-height: 100%;
   margin: 0;
 }
 
 body {
   background: var(--bg);
+  background-image: var(--bg-wash);
+  background-attachment: fixed;
   color: var(--fg);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 15px;
-  line-height: 1.55;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px 20px;
+  font-family: system-ui, "Segoe UI Variable Text", "Segoe UI",
+    "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 28px 40px 40px;
 }
 
 .card {
-  width: min(760px, 100%);
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: var(--shadow);
-  padding: 32px;
+  width: 100%;
+  max-width: 880px;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 8px;
+  margin: 0 0 10px;
 }
 
+/* The product name already sits in the title bar; a second mark here would
+   repeat it a few pixels lower. */
 .brand .mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  font-size: 19px;
+  display: none;
 }
 
 h1 {
-  font-size: 20px;
-  margin: 0 0 6px;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin: 0;
 }
 
 h2 {
-  font-size: 16px;
-  margin: 28px 0 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 30px 0 10px;
 }
 
 p {
-  margin: 0 0 12px;
+  margin: 0 0 10px;
 }
 
 .sub,
 .hint {
   color: var(--muted);
-  font-size: 13.5px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.hint {
+  margin-top: 10px;
 }
 
 .detail {
-  margin: 14px 0 0;
+  margin: 10px 0 0;
   padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg) 72%, var(--card));
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  border-radius: 4px;
+  background: var(--detail-bg);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo,
+    monospace;
+  font-size: 12px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
+  max-height: 260px;
   overflow: auto;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 20px;
+  gap: 8px;
+  margin-top: 24px;
 }
 
 button {
   font: inherit;
-  border-radius: 9px;
-  border: 1px solid var(--line);
-  background: var(--card);
+  font-size: 13px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--control-bg);
   color: var(--fg);
-  padding: 9px 14px;
-  cursor: pointer;
+  cursor: default;
 }
 
 button:hover {
-  border-color: var(--accent);
+  background: var(--control-bg-hover);
+}
+
+button:active {
+  background: var(--line);
 }
 
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-fg);
-  font-weight: 600;
+  font-weight: 500;
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 button:disabled {
-  opacity: 0.55;
-  cursor: default;
+  opacity: 0.5;
 }
 
 .status {
   margin-top: 14px;
-  font-size: 13.5px;
-  min-height: 20px;
+  font-size: 13px;
+  min-height: 18px;
+  color: var(--muted);
 }
 
 .status.ok {
@@ -166,11 +186,12 @@ button:disabled {
 
 .spinner {
   width: 100%;
-  height: 4px;
+  max-width: 320px;
+  height: 3px;
   border-radius: 999px;
   background: var(--line);
   overflow: hidden;
-  margin: 22px 0 16px;
+  margin: 20px 0 6px;
 }
 
 .spinner::after {
@@ -180,7 +201,7 @@ button:disabled {
   height: 100%;
   border-radius: 999px;
   background: var(--accent);
-  animation: slide 1.25s ease-in-out infinite;
+  animation: slide 1.4s ease-in-out infinite;
 }
 
 @keyframes slide {
@@ -192,29 +213,38 @@ button:disabled {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .spinner::after {
+    animation: none;
+    width: 100%;
+  }
+}
+
 dl {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 8px 18px;
+  gap: 7px 24px;
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 dt {
   color: var(--muted);
+  white-space: nowrap;
 }
 
 dd {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo,
+    monospace;
+  font-size: 12.5px;
   word-break: break-all;
 }
 
 label {
   display: block;
-  margin: 0 0 4px;
-  font-size: 13.5px;
+  margin: 0 0 5px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -226,25 +256,35 @@ input[type="text"],
 input[type="number"],
 select {
   width: 100%;
+  height: 32px;
   font: inherit;
-  padding: 8px 10px;
-  border-radius: 9px;
-  border: 1px solid var(--line);
-  background: var(--bg);
+  font-size: 13px;
+  padding: 0 10px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--control-bg);
   color: var(--fg);
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: inset 0 -1px 0 0 var(--accent);
 }
 
 .check {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .check label {
   margin: 0;
   color: var(--fg);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .grid {
@@ -253,11 +293,23 @@ select {
   gap: 0 20px;
 }
 
+ul {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+li {
+  margin-bottom: 4px;
+}
+
 @media (max-width: 620px) {
+  body {
+    padding: 20px 22px 32px;
+  }
   .grid {
     grid-template-columns: 1fr;
   }
-  .card {
-    padding: 22px;
+  h1 {
+    font-size: 24px;
   }
 }

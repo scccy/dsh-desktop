@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, Window};
 
 use dsh_lite_core::config::{CloseAction, Platform};
 
@@ -32,7 +32,7 @@ pub fn effective_close_action(
 }
 
 /// Records the current geometry in memory; it is written when the shell exits.
-pub fn remember_layout(app: &AppHandle, window: &WebviewWindow) {
+pub fn remember_layout(app: &AppHandle, window: &Window) {
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;
     };
@@ -42,7 +42,7 @@ pub fn remember_layout(app: &AppHandle, window: &WebviewWindow) {
 }
 
 /// Reads the window geometry straight from the window manager.
-fn window_layout(window: &WebviewWindow) -> Option<WindowLayout> {
+fn window_layout(window: &Window) -> Option<WindowLayout> {
     let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return None;
     };
@@ -64,7 +64,7 @@ pub fn persist_layout(app: &AppHandle, state: &AppState) {
         return;
     }
     let layout = state.layout().or_else(|| {
-        app.get_webview_window(MAIN_WINDOW)
+        app.get_window(MAIN_WINDOW)
             .as_ref()
             .and_then(window_layout)
     });
@@ -125,7 +125,7 @@ pub fn quit(app: &AppHandle) {
 
 /// Shows, restores and focuses the single main window.
 pub fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    if let Some(window) = app.get_window(MAIN_WINDOW) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -134,14 +134,14 @@ pub fn show_main_window(app: &AppHandle) {
 
 /// Hides the main window, keeping the process alive.
 pub fn hide_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    if let Some(window) = app.get_window(MAIN_WINDOW) {
         let _ = window.hide();
     }
 }
 
 /// Whether the main window is currently visible.
 pub fn main_window_visible(app: &AppHandle) -> bool {
-    app.get_webview_window(MAIN_WINDOW)
+    app.get_window(MAIN_WINDOW)
         .and_then(|window| window.is_visible().ok())
         .unwrap_or(false)
 }
