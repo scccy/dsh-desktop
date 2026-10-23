@@ -5,19 +5,26 @@
 ## 1. 分层
 
 ```text
-┌──────────────────────────────────────────────────────┐
-│ src-ui/            零构建 HTML/CSS/JS                 │  加载页 / 错误页 / 设置页
-├──────────────────────────────────────────────────────┤
-│ src-tauri/         Rust + Tauri v2                    │  窗口、托盘、菜单、单实例、WebView 生命周期
-│   main / connection / lifecycle / window /           │
-│   tray / menu / shortcuts / state                    │
-│   platform/        唯一的平台差异层                   │
-├──────────────────────────────────────────────────────┤
-│ crates/dsh-lite-core/   纯 Rust，无 GUI 依赖           │  可被 cargo test 完全覆盖
-│   config / cli / dsh_locate / env_probe /             │
-│   launcher / url_policy / logging                     │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ src-ui/            零构建 HTML/CSS/JS                        │
+│   header.html                                               │  40 DIP 标题栏（壳自己的 chrome）
+│   loading / error / settings                                │  三屏
+├──────────────────────────────────────────────────────────────┤
+│ src-tauri/         Rust + Tauri v2                           │
+│   main / connection / lifecycle / window /                   │
+│   tray / menu / menubar / shortcuts / state                  │
+│   platform/        唯一的平台差异层                          │
+├──────────────────────────────────────────────────────────────┤
+│ crates/dsh-lite-core/   纯 Rust，无 GUI 依赖                 │
+│   config / cli / dsh_locate / env_probe /                    │
+│   launcher / url_policy / logging / update / job             │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+一个窗口里有两个 webview：`header`（40 DIP，画壳自己的标题栏）和 `content`（其余部分，装三屏或 `dsh web`）。窗口本身不带 webview，用 `tauri::window::WindowBuilder` 建裸窗口，再用 `Window::add_child` 挂两个子 webview，因此两者可以各自导航而互不影响。`add_child` 属于 Tauri 的 `unstable` feature，已在 `src-tauri/Cargo.toml` 里显式打开；升级 Tauri 时要先确认该 API 仍然存在。
+
+为什么不是「一个 webview 里切换页面」：标题栏必须常驻在 `dsh` 页面之上，而单元 webview 只能整页导航，要么靠注入浮层（ADR-004 已否决），要么让标题栏随页面一起消失。拆成两个 webview 是唯一不碰 `dsh` 页面的做法。
+
 
 依赖方向严格单向：`src-tauri` 依赖 `dsh-lite-core`，反之不成立。`dsh-lite-core` 不得 `use tauri::*`、不得创建窗口、不得读全局环境变量（环境探针的输入由调用方传入），因此定位规则、`dsh web:` 行解析、token 脱敏、环境差分合并、退出码分类都能在无显示器的 CI 上单测。
 
@@ -131,9 +138,9 @@ d  刷写日志、释放单实例锁、退出
 
 ## 6. 关键决策（ADR）
 
-以下两条是产品已确认的决策，记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果；后续讨论请以这两条为前提，不要重复论证。
+以下按时间顺序记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果。**当前有效的是 ADR-005**；ADR-001 / 003 / 004 保留原文，只在标题上标注状态，用来解释「为什么当初那样选」，不要拿它们当现状。
 
-### ADR-001 窗口装饰使用系统原生标题栏
+### ADR-001 窗口装饰使用系统原生标题栏（已被 ADR-005 取代）
 
 **决策**：Windows / macOS / Linux 一律保留系统原生标题栏（Tauri 窗口配置 `decorations: true`），窗口标题固定 `dsh desktop`，不自绘任何窗口控件。
 
@@ -155,6 +162,8 @@ d  刷写日志、释放单实例锁、退出
 - 若将来必须自绘，先改本 ADR 并说明如何绕开 §5 的注入限制，再动代码。
 
 > **2026-10-21 状态变更**：Windows 原生壳已改为**自绘标题栏行**（见 [ADR-004](#adr-004-windows-原生壳自绘标题栏行内容属于壳)）。本条的否决前提之一是"Tauri 没有等价开关"，该前提只对 `src-tauri` 成立；WinUI 有 `ExtendsContentIntoTitleBar`，且 WebView2 排在标题栏行之下、不需要页面让位，因此注入 JS 不再是自绘的前提。macOS / Linux（Tauri 壳）仍按本条执行。
+
+> **2026-10-23 最终状态**：本条整体废止。三平台现在都自绘标题栏（`decorations: false` + `header` webview，见 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏)）。但本条最有价值的一条结论被继承下来并仍然强制：**不向 `dsh` 页面注入任何 JS**——双 webview 正是为了在不注入的前提下让标题栏常驻。本条否掉「注入 JS 让页面让位」的理由，今天依然成立。
 
 ### ADR-002 单一 Tauri 代码线，不做 macOS / Windows 双原生壳
 
@@ -179,7 +188,11 @@ d  刷写日志、释放单实例锁、退出
 
 > **2026-10-21 状态变更**：本条在 **Windows 一侧**已被 [ADR-003](#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接) 取代，macOS / Linux 仍沿用本条（Tauri 单线）。取代的事实前提是产品明确接受"安装体积 ~75 MB"这一代价，而本条当初的核心否决理由（体积、双份维护）因此需要重新计价——重算结果见 ADR-003。
 
-### ADR-003 Windows 采用 WinUI 3 原生壳 + Rust C ABI 桥接
+> **2026-10-23 恢复**：ADR-003 及其 C# 壳已被 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏) 废止，本条重新成为三平台唯一路线。而且这次是名副其实的一条线：只有一份 `src-ui/`，没有第二套 UI 实现，也没有 C ABI 层。本条「退路不锁死」的结论同样作废——`dsh-ffi` 已删除，若将来真的需要非 Tauri 客户端，再单独决策并重建。
+
+### ADR-003 Windows 采用 WinUI 3 原生壳 + Rust C ABI 桥接（已被 ADR-005 取代）
+
+> **状态：已废。** 2026-10-23 起 Windows 与其他平台共用 `src-tauri` 一套壳，`src-winui/` 与 `crates/dsh-ffi/` 已删除。本 ADR 保留原样，作为「为什么当初会走双壳」的记录；取代它的决策与理由见 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
 
 **决策**：Windows 上新增 `src-winui/`（C# + WinUI 3）作为原生壳，逻辑不重写，通过 `crates/dsh-ffi` 的 C ABI 复用 `dsh-lite-core`。macOS / Linux 继续用 `src-tauri/`，直到各自被单独决策。
 
@@ -212,7 +225,9 @@ d  刷写日志、释放单实例锁、退出
 - **macOS / Linux 不受影响**：`crates/dsh-ffi` 同时产出 `staticlib`，将来上 Swift 时可复用同一份契约；
 - **两壳并存期的行为一致性靠契约和文档，不靠记忆**：错误分类词汇（`dsh-not-found` / `version` / `spawn` / `ready` / `auth` / `internal`）与三屏语义是共享契约，新增错误种类必须两边同时落地。
 
-### ADR-004 Windows 原生壳自绘标题栏行，内容属于壳
+### ADR-004 Windows 原生壳自绘标题栏行，内容属于壳（已随 ADR-003 一并废止）
+
+> **状态：已废。** 但它的两条结论被 ADR-005 继承：标题栏是壳的功能、菜单项只能是壳的动作、壳不向 `dsh` 页面注入任何脚本。40 DIP 的行高、与页面侧栏同色的底、把菜单声明为可交互区这三条实现约定，也照搬到了新的 `header` webview 上。
 
 **决策**：`src-winui` 用 `ExtendsContentIntoTitleBar` 自绘一条 40 DIP 标题栏行：只有**壳自己的菜单**（应用 / 视图），右侧最小化 / 最大化 / 关闭仍由 Windows 绘制，行底色取页面侧栏填充色。不向承载的 dsh 页面注入任何脚本。
 
@@ -243,24 +258,52 @@ d  刷写日志、释放单实例锁、退出
 - 托盘图标、快捷键注册仍未做，见 §7 对照表。
 
 
-## 7. 两条壳的落地对照
+### ADR-005 回到单一 Tauri 壳，用双 webview 画标题栏
 
-| 能力 | `src-tauri`（三平台） | `src-winui`（Windows） |
+**决策**：删除 `src-winui/` 与 `crates/dsh-ffi/`，Windows / macOS / Linux 共用 `src-tauri` 一套壳。窗口改为「裸窗口 + `header` / `content` 两个子 webview」，标题栏由壳自己的 `src-ui/header.html` 绘制；菜单用系统原生 popup 弹出。
+
+**背景**：ADR-003 的前提是「Windows 观感优先、100 MB 以内可接受」，为此接受了 C# 壳加 C ABI 桥接。跑通之后的真实账是另一回事：
+
+| 代价 | 具体表现 |
+|---|---|
+| 功能不同步 | WinUI 壳没有托盘、没有设置写回、没有 profile 预检、没有终态 URL 断言 |
+| 改一处要动两边 | 任何行为变化都要同时改 Rust 与 C#，并跟着改 ABI 版本 |
+| 三屏两份实现 | XAML 一套、HTML 一套，观感靠人工对齐 |
+| 平台覆盖 | WinUI 只覆盖 Windows，而产品要的是全平台一套 |
+
+**被否掉的替代方案**：
+
+| 方案 | 代价 | 结论 |
 |---|---|---|
-| 三屏（加载 / 错误 / 设置） | 零构建 HTML/CSS | XAML + Fluent/Mica |
-| 标题栏 | 系统标题栏（ADR-001） | 壳自绘 40 DIP 行 + 系统 caption 按钮（ADR-004） |
-| 壳自己的菜单 | 系统菜单栏 / macOS 应用菜单 | 标题栏行内的 应用 / 视图 菜单 |
-| 逻辑来源 | 直接 `use dsh_lite_core` | `dsh-ffi` C ABI + JSON 事件 |
-| dsh 定位 / 版本探测 | 有 | 有（经桥接） |
-| 启动 `dsh web` / 就绪行解析 | 有 | 有（经桥接） |
-| 停止子进程无孤儿 | 有 | 有（经桥接，`dsh_stop`） |
-| 检查 dsh 更新（`npm view`，只报告不安装） | 有（菜单栏） | 有（应用 → 检查 dsh 更新，经桥接） |
-| 预检 profile / 登录 shell 探针 | 有 | **未接**（Windows 无需登录 shell 探针；预检待接） |
-| 托盘图标 / 全局快捷键 | 有 | **未接** |
-| 单实例锁 | 有（`tauri-plugin-single-instance`） | 有（命名互斥量 + 命名事件，第二实例提到前台后退出） |
-| 子进程跟随壳一起死 | 有（`dsh-lite-core` Job Object，两壳共用） | 有（同一 Job Object，`KILL_ON_JOB_CLOSE`） |
-| 认证校验（终态 URL 断言） | 有 | **未做**（依赖 WebView2 跟随 302） |
-| 设置写回 `config.toml` | 有 | **只读** |
-| 打包 | Tauri bundler（msi/dmg/deb） | 未打包绿色目录 |
+| egui / iced / Slint 纯自绘 | 都不提供内嵌 WebView，只能把 WebView 当无边框子窗口覆盖；现成的桥接 crate 都是实验性的（`iced_wry` 2 star、`egui_webview` 标注 experimental、Slint 的 WebView 仍是 open request）；现有 Fluent 观感要从零重画 | 否掉：为三屏去赌不成熟的 overlay |
+| Dioxus（RSX + wry） | 渲染底座与 Tauri 完全相同（同一个 wry + 系统 WebView），只换来「UI 用 Rust 写」；打包、托盘、单实例、更新链路全部重做 | 否掉：收益是语言偏好，代价是整条工程链 |
+| 保留双壳 | 功能永远差一截，文档必须处处区分 | 否掉：与「一套代码全平台」直接冲突 |
 
-上表的"未接"是当前真实状态，不是设计取舍的结论；两壳并存期内不得在文档或发布说明里声称 Windows 原生壳已达到 Tauri 壳的功能等价。
+**为什么不是一个 webview 里切页面**：标题栏要常驻在 `dsh` 页面之上，而单 webview 只能整页导航。靠注入浮层实现就是 ADR-004 已经否决的那条路（WebView2 不实现 `-webkit-app-region`，拖动会变成死区，且要把壳的观感押在上游未承诺的私有属性上）。拆成两个 webview 是唯一完全不碰 `dsh` 页面的做法。
+
+**后果**：
+
+- 一套壳三平台，三屏只有一份 HTML/CSS；
+- 标题栏的拖动、双击最大化、最大化/还原图标切换、三个窗口按钮全部由壳自己实现（`shell_window_action` / `shell_drag` / `shell_window_state`）；
+- 菜单必须用原生 popup（`shell_menu` → `Menu::popup_at`）：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉；
+- 失去 WinUI 的 Mica 与标题栏右键的 Snap 悬浮菜单。底色改用页面侧栏填充色（浅 `#f9fafb` / 深 `#17181b`）保证与内容无缝；窗口拖动走 `WM_NCLBUTTONDOWN` 的 HTCAPTION，Windows 的贴边 Snap 仍由系统接管；
+- `tauri` 打开 `unstable` feature（`Window::add_child`），升级 Tauri 时必须先确认该 API 仍在、语义未变；
+- `auto_resize` 不能用：它让子 webview 随窗口等比缩放，而这里需要 `header` 恒为 40 DIP、`content` 吃掉剩余高度。所以 `main.rs::layout_webviews` 在每次 `Resized` / `ScaleFactorChanged` 后按物理像素重新摆位；
+- 文档、脚本、CI 里一切「两条壳」的表述作废（含随之删除的 `build-installer.ps1` / `redeploy.ps1` / `verify-shell-*.ps1`）。
+
+## 7. 落地对照
+
+| 能力 | 实现位置 |
+|---|---|
+| 三屏（加载 / 错误 / 设置） | `src-ui/` 零构建 HTML/CSS，装在 `content` webview |
+| 壳自己的标题栏 | `src-ui/header.html` + `header` webview（ADR-005） |
+| 壳的菜单 | 原生 popup：`main.rs::shell_menu`，动作在 `run_menu_entry` |
+| dsh 定位 / 版本探测 | `dsh-lite-core::dsh_locate` |
+| 启动 `dsh web` / 就绪行解析 | `dsh-lite-core::launcher` |
+| 认证（终态 URL 必须脱 token） | `window::classify_page_load` + `connection::handle_page_load` |
+| 认证看门狗（首次加载失败自动重试一次） | `connection::arm_auth_watchdog` |
+| 停止子进程、不留孤儿 | `dsh-lite-core::job`（Windows Job Object / Unix 进程组） |
+| 检查 dsh 更新（`npm view`，只报告不安装） | `dsh-lite-core::update` + `main.rs::check_update` |
+| 托盘 / 应用菜单 | `src-tauri/src/{tray,menu,menubar}.rs` |
+| 单实例 | `tauri-plugin-single-instance` |
+| 设置写回 `config.toml` | `main.rs::save_settings` |

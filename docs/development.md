@@ -112,51 +112,35 @@ shasum -a 256 -c SHA256SUMS.txt  # macOS
 
 硬性规则：签名私钥、证书、密码只存在于仓库 secrets，**绝不提交到仓库**，也不写进日志或产物说明。
 
-### 4.4 Windows 安装包（`src-winui`，Inno Setup）
+### 4.4 Windows 安装包（Tauri bundler，NSIS）
 
-```powershell
-pwsh -File scripts\build-installer.ps1        # Rust 桥 → dotnet publish → ISCC
-# 产出：dist\dsh-desktop-winui-setup-<version>.exe
+```sh
+cargo tauri build --config src-tauri/tauri.release.conf.json --bundles nsis
+# 产出：src-tauri\target\release\bundle\nsis\dsh-desktop_<version>_x64-setup.exe
 ```
 
-- **实测**（2026-10-21）：`dotnet publish` **156.6 MB / 314 文件**（自包含、不做裁剪）→ 安装包 **42.2 MB**（lzma2）；静默安装 → 启动 → 卸载全流程验证通过，卸载后目录被清空；
-- **安装布局**：根目录只有四项 —— `app\`（应用本体，280 个文件）、`启动 dsh desktop.lnk`、`安装说明.txt`、`unins000.exe`/`.dat`。发布输出本身是平铺的一堆文件，永远不直接铺在根目录；
-- **语言资源**：publish 默认带 87 个 culture 目录（WinAppSDK 原生 `.mui`），构建脚本在打包前只保留 `en-us` / `zh-CN` / `zh-TW`（+ `Microsoft.UI.Xaml`），其余目录直接删掉（314 → 280 个文件）。**不能用 Inno 的 `Excludes` 做这件事**：它只匹配文件名，而每个 culture 里的文件名完全相同（`Microsoft.ui.xaml.dll.mui`），按名字分不出 `zh-CN` 和 `af-ZA`；
-- 安装形态：per-user（`PrivilegesRequired=lowest`，**不弹 UAC**），默认装到 `%LOCALAPPDATA%\Programs\dsh desktop`，安装时可选 all-users；卸载入口在「设置 → 应用」与开始菜单「Uninstall dsh desktop」，也可直接运行安装目录里的 `unins000.exe`；
-- **快捷方式**：开始菜单（程序 + 卸载）、**桌面（默认勾选）**，外加安装目录里一个可见的 `启动 dsh desktop.lnk`（载荷在 `app\` 下，不该让人猜）。静默安装要桌面图标时必须带 `/MERGETASKS=desktopicon`，否则任务被跳过；
-- **图标**：`<ApplicationIcon>` 指向 `src-tauri/icons/icon.ico`，exe 内嵌后任务栏 / Alt+Tab / 开始菜单 / 桌面快捷方式共用这一个图标（未打包应用没有 manifest 图标路径，只能靠 exe 资源）；
-- 用户数据（`%LOCALAPPDATA%\dsh desktop`：WebView2 profile、滚动日志、`config.toml`）卸载时**故意保留**；
-- 版本号唯一来源是 `Cargo.toml` 的 `[workspace.package] version`，脚本读取后以 `/DAppVersion` 传给 ISCC，不在 `.iss` 里写死；
-- **未签名**：SmartScreen 会提示"未知发布者"。签名点位就在 ISCC 产物上（`signtool sign /fd sha256 /tr <时间戳> dist\dsh-desktop-winui-setup-*.exe`），证书到位后接进脚本即可，不影响今天的分发；
-- **构建末尾自带冒烟检查**：脚本会启动刚发布的 `dsh-desktop-winui.exe`，等窗口出现、再正常关闭；进程若在窗口出现前退出（`0xC000027B` 之类），脚本打印新写入的 `winui-crash.log` 片段、**删掉刚生成的安装包**并以退出码 1 结束 —— 不能启动的包不许留在 `dist\`。已有壳实例在跑时会跳过（单实例锁会让新进程立刻退出，否则会误判），需要强制跳过用 `-SkipSmokeTest`；
-- **不做裁剪**：`PublishTrimmed=false`。裁剪能把 156 MB 压到 71 MB，但会让 `.pri`、WebView2 的 WinRT 投影、`System.Threading.Thread` 这类"链接器看不见"的依赖在发布版里静默失效（Debug 正常、启动即 `0xC000027B`）。体积预算只要求"不要太大"，因此选择完整自包含输出 + 官方 API。完整记录见 [src-winui/README.md](../src-winui/README.md#为什么不做裁剪)。
-
-#### 一条命令更新本机安装
-
-```powershell
-pwsh -File scripts\redeploy.ps1
-# 关壳 -> 构建（含冒烟）-> 卸载 -> 安装 -> 校验 SHA-256 -> 启动
-```
-
-失败时脚本以非零退出码结束，并且**不会动已安装的旧版本**（卸载发生在构建成功之后）。
-`-InstallDir` 换安装位置，`-SkipBuild` 只做安装，`-NoLaunch` 装完不启动。
-脚本不会去杀不属于本项目的 `dsh` 进程，只把残留进程数量报出来。
+- **发布产物只认 MSVC**（见 §6.1）：GNU 工具链能跑 `cargo build` 与测试，但打包、签名、WebView2 的运行时假设都以 MSVC 为准；
+- 安装形态由 `tauri.release.conf.json` 决定：`nsis.installMode = currentUser`（默认装到用户目录、不弹 UAC）、语言 `English` + `SimpChinese`；
+- WebView2 不随包携带：`webviewInstallMode = downloadBootstrapper`，系统缺 WebView2 时安装器联网引导；
+- 图标来自 `src-tauri/icons/`（`icon.ico` 由 `scripts/render-icons.ps1` 从 `assets/icon.svg` 生成）；
+- **未签名**：SmartScreen 会提示未知发布者；签名点位见 §4.3；
+- 出包后手动启动一次，确认三屏与 `dsh web` 都能加载（流水线不内置冒烟检查）。
 
 ### 4.5 macOS dmg（现状与缺口）
 
-两条线必须分清，不要互相代替：
+三平台共用 `src-tauri` 一套代码（ADR-005），macOS 的 dmg 只是其中之一：
 
 | 线 | 状态 |
 |---|---|
-| Tauri 壳（`src-tauri`，三平台） | `release.yml` 已在 `macos-latest` 上执行 `--bundles dmg`，但**从未真正触发过**（仓库还没打过 tag），所以 dmg 目前只停留在配置层面，没有任何产物被验证 |
-| WinUI 原生壳（`src-winui`） | Windows 独有。mac 想要同样的原生形态，需要 SwiftUI + `dsh-ffi` 的 `staticlib`（ADR-003 预留的口子），并且**必须在一台 mac 上开发与验证** |
+| Windows / Linux / macOS | 同一份 `src-tauri` 代码，`release.yml` 在各平台分别跑 `cargo tauri build` |
+| macOS dmg | `release.yml` 已在 `macos-latest` 上执行 `--bundles dmg`，但**从未真正触发过**（仓库还没打过 tag），所以 dmg 目前只停留在配置层面，没有任何产物被验证 |
 
 mac 落地时的阻塞项：
 
 - **签名与公证**：需要 `Developer ID Application` 证书 + `notarytool`；没有证书只能 ad-hoc 签名，用户要右键 → 打开，且 Gatekeeper 会拦下双击；
 - 本机是 Windows，**构建不出也验证不了** macOS 产物，dmg 的一切结论只能在 mac 或 CI 上得出；
 - 目标机器同样需要自备 `dsh` 与 Node（与 Windows 一致），壳不打包运行时；
-- Tauri 壳的 dmg 与 WinUI 安装包在**观感上不是同一套 UI**（三屏 HTML vs 原生 Fluent），文档里不得混为一谈。
+- 三平台现在是同一套 UI（同一份 `src-ui/`），不存在某个平台观感不同的问题；剩下的差异只有系统 WebView 的渲染细节（WebKitGTK / WebView2 / WKWebView）。
 
 ## 5. CI 与本地环境的差异
 
@@ -193,16 +177,21 @@ mac 落地时的阻塞项：
 
 ### 6.4 窗口装饰与观感
 
-- 不复刻官方 Windows 定制标题栏：三平台一律系统原生标题栏（`decorations: true`），观感与官方 Electron 客户端不同是有意选择，理由与被否掉的方案见 [architecture.md ADR-001](architecture.md#adr-001-窗口装饰使用系统原生标题栏)；
-- Windows 观感增强（Mica / 亚克力）为可选项且**未排期**：Tauri 2.12 起提供 `WindowEffect`（`tauri::window::Effect`，实现见 `tauri` crate 的 `src/vibrancy/windows.rs`），仅 Windows 11 生效，低版本自动退回纯色窗口背景；接入前需在 Win11 真机确认所用 Tauri 版本的 API 与降级表现，未验证前不写进任何对外承诺。
+- 标题栏由壳自己画：`decorations: false`，顶上是 40 DIP 的 `header` webview，下面是 `content` webview。决策与被否掉的替代方案见 [architecture.md ADR-005](architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)；
+- 底色是取样自页面的纯色（浅 `#f9fafb` / 深 `#17181b`），与内容区无缝衔接；**没有 Mica**，因为 WebView2 里拿不到系统 Mica 材质，用同色近似。切深色主题或 `dsh` 改版时这两个值要复核；
+- 拖动只绑在菜单右侧的空白条（`.drag`），400 ms 内的第二次按下判为双击 → 最大化；三个窗口按钮走 `shell_window_action`，关闭仍走 `CloseRequested`，所以 `window.closeAction` 的 hide / quit 语义不变；
+- 无边框窗口的阴影由 Tauri 默认的 DWM 阴影提供，圆角交给系统；本项目不额外调用 DWM API；
+- 布局在每次 `Resized` / `ScaleFactorChanged` 后由 `main.rs::layout_webviews` 重算——子 webview 不会自己跟随窗口，`auto_resize` 又是等比缩放，不适用于「header 固定 40 DIP + content 吃掉剩余」的布局。
 
 平台差异代码的归属（哪些代码算窗口观感、哪些算 core 逻辑）见 [architecture.md §1.1](architecture.md#11-平台差异层)。
 
-### 6.5 Windows / Linux 菜单栏不提供「编辑」菜单
+### 6.5 菜单只有「应用」和「视图」
 
-- Windows / Linux 窗口标题栏下方只有「应用」菜单（打开设置 / 打开日志目录 / 检查 dsh 更新 / 退出）；**没有**「编辑」菜单；
-- 原因：`muda 0.20` 的 Windows 后端为 `PredefinedMenuItem::{undo,redo,cut,copy,paste,select_all}` 只注册 accelerator 标签，不向焦点控件投递 `WM_COPY` / `WM_PASTE` 等编辑命令。在真实 WebView2 窗口里的实测结果：把 `PASTED-TEXT` 放进剪贴板、把焦点放在设置页的 profile 输入框（该框有焦点环）后点「编辑 → 粘贴」，输入框内容不变；而「全选 + 复制」确实生效（剪贴板被替换成整页选中文本）。半可用的菜单比没有菜单更容易误导用户，因此整体移除；
-- 编辑能力由 WebView2 自带的 `Ctrl+Z` / `Ctrl+Y` / `Ctrl+X` / `Ctrl+C` / `Ctrl+V` / `Ctrl+A` 与 `Delete` 承担，壳不注册、不拦截这些按键（壳只在 debug 构建或 `window.devtools = true` 时注入一个只上报不自处理的按键监听，用于 F12 等壳级快捷键）；
+- 两项都是壳的动作，没有「编辑」菜单：编辑能力由 WebView2 自带的 `Ctrl+Z/Y/X/C/V/A` 与 `Delete` 承担，壳不注册也不拦截；
+- **应用**：打开设置 / 重试连接（`Ctrl+Shift+L`）/ 打开日志目录 / 检查 dsh 更新… / 退出（`Ctrl+Q`）；
+- **视图**：刷新页面（`Ctrl+R`）/ 关于 dsh desktop；
+- 「重试连接」重跑整条启动链（停掉 `dsh` 再起，`connection::restart`），「刷新页面」只让 `content` webview 重新加载当前 URL（`Webview::reload`）——两者不可混淆；
+- 菜单是**原生 popup**（`Menu::popup_at`），不是 HTML 下拉：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉。菜单项里的快捷键只是右侧的提示文字，真正处理按键的是 `shortcuts.rs`；
 - macOS 不受影响：应用菜单的 Edit 子菜单走 AppKit responder chain，是真正的原生编辑。
 
 ## 7. 提交前的最小检查

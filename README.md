@@ -3,29 +3,28 @@
 面向技术用户的轻量原生桌面外壳：**不自带任何运行时**，只负责启动并承载本机已有的 `dsh web`，并把宿主机真实的系统环境交给它。
 
 - 产品名：`dsh desktop` · 可执行文件 `dsh-desktop` · 包标识 `dev.dsh.desktop`
-- 语言 / 框架：Rust 核心 + 两条壳——Windows 用 **WinUI 3**（`src-winui/`），三平台通用壳用 **Tauri v2**（`src-tauri/`）；均为系统 WebView，无 Chromium、无 Node 构建链
-- 平台：Windows · Linux · macOS，单一 Rust 核心（`crates/dsh-lite-core`）
-- 体积：Tauri 壳目标 < 15 MB；WinUI 壳实测 74.5 MB（产品已明确接受 ~100 MB 以内）
+- 语言 / 框架：Rust + **Tauri v2**，系统 WebView（WebView2 / WKWebView / WebKitGTK），无 Chromium、无 Node 构建链
+- 平台：Windows · Linux · macOS，**同一份代码**（`src-tauri` + `crates/dsh-lite-core`）
+- 体积：二进制目标 < 10 MB，安装包目标 < 15 MB
 
 ## 状态（如实）
 
-**M0 骨架完成，M1 主链路代码已落地；Windows 原生壳（WinUI 3）已在本机端到端跑通；尚未发布，也还没有可安装包。**
+**单一 Tauri 壳，三平台一套代码；Windows 本机已端到端跑通（自绘标题栏、原生菜单、单实例、Job Object、认证）。尚未发布，也还没有实测过的安装包。**
 
 | 部分 | 状态 |
 |---|---|
-| Cargo workspace（`crates/dsh-lite-core` + `crates/dsh-ffi` + `src-tauri`） | 已建立 |
-| `dsh-lite-core`：配置、CLI、定位、环境探针、启动、URL 策略、日志 | 已实现并由 `cargo test` 覆盖（91 项） |
-| `crates/dsh-ffi`：C ABI（`cdylib` + `staticlib`），供非 Tauri 壳复用核心 | 已实现并由 `cargo test` 覆盖（10 项） |
-| `src-tauri` 窗口壳（单实例、窗口、连接/生命周期、托盘、macOS 菜单、快捷键） | 已实现，本地 `cargo build -p dsh-desktop` 通过；运行时行为待真机验收 |
+| Cargo workspace（`crates/dsh-lite-core` + `src-tauri`） | 已建立 |
+| `dsh-lite-core`：配置、CLI、定位、环境探针、启动、URL 策略、日志、更新判定、进程回收 | 已实现并由 `cargo test` 覆盖 |
+| `src-tauri` 窗口壳：单窗口双 webview、单实例、连接/生命周期、托盘、菜单、快捷键 | 已实现，Windows 本机跑通 |
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
-| `src-ui/` 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
-| `src-winui/` Windows 原生壳（WinUI 3 + WebView2，三屏 + 自绘标题栏 + 检查更新 + 单实例 + Job Object） | 已跑通：定位 dsh → 启动 → 加载 Web GUI、错误屏、设置屏；单实例与「壳死子进程跟着死」均实测；托盘/设置写回**未接**（见 [src-winui/README.md](src-winui/README.md)） |
-| Windows 安装包（Inno Setup，`scripts/build-installer.ps1`） | 已产出 `dist/dsh-desktop-winui-setup-0.1.0.exe`（20.6 MB），安装→启动→卸载实测通过；**未签名** |
+| `src-ui/` 标题栏 + 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
+| Windows 安装包（Tauri bundler / NSIS） | 配置就位，未实测 |
 | 占位图标（`assets/`、`src-tauri/icons/`） | 已就位（正式设计稿是发布阻塞项） |
-| 三平台 CI（fmt / clippy / test / release 构建） | 已就位（尚未包含 WinUI 壳的构建） |
+| 三平台 CI（fmt / clippy / test / release 构建） | 已就位 |
 | 发布流水线（tag 触发、三平台打包、SHA-256、可选签名） | 已就位（签名未接线，见 [docs/development.md](docs/development.md)） |
+| macOS / Linux 真机验收 | 未做 |
 
-窗口装饰使用系统原生标题栏，不做官方 Electron 那样自绘标题栏；"单一 Tauri 代码线"的原始理由见 [docs/architecture.md §6 ADR-002](docs/architecture.md#adr-002-单一-tauri-代码线不做-macos--windows-双原生壳)，Windows 侧改为原生壳的决策与实测代价见 [ADR-003](docs/architecture.md#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接)。
+窗口装饰由壳自己画：`decorations: false` + 一个 40 DIP 的 `header` webview 画标题栏，下面是 `content` webview 装 `dsh web` 或三屏。为什么不能在一个 webview 里做、以及被否掉的替代方案见 [ADR-005](docs/architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
 
 ## 前置条件
 
@@ -107,20 +106,30 @@ crates/dsh-lite-core/     # 纯 Rust 逻辑，无 GUI 依赖，可用 cargo test
   src/launcher.rs         # 子进程生命周期与 dsh web: 行解析
   src/url_policy.rs       # token 提取、脱敏、同源判断
   src/logging.rs          # 滚动日志与崩溃报告
+  src/update.rs           # npm view 结果的判定（只报告，不安装）
+  src/job.rs              # Job Object / 进程组：壳死子进程跟着死
+  src/console_text.rs     # OEM / UTF-8 混合输出的容错解码
+  src/text.rs             # 平台文案
 src-tauri/                # Tauri 应用：平台粘合层
-  src/main.rs             # 组装：CLI → 配置 → 连接 → 窗口
-  src/connection.rs       # 连接解析与托管/附着两条路径
+  src/main.rs             # 组装：CLI → 配置 → 连接 → 窗口（裸窗口 + 两个子 webview）
+  src/connection.rs       # 连接解析、托管/附着两条路径、认证看门狗
   src/lifecycle.rs        # 启动收尾、退出清理、窗口显示
-  src/window.rs           # 窗口状态、外链拦截、页面切换
+  src/window.rs           # 窗口状态、外链拦截、页面分类、webview 标签
   src/tray.rs             # Windows / Linux 托盘
   src/menu.rs             # macOS 应用 / Window / Edit 菜单与 Dock 菜单
+  src/menubar.rs          # Windows / Linux 菜单栏
   src/shortcuts.rs        # 壳快捷键
   src/state.rs            # 运行时共享状态
   src/platform/           # 唯一的平台差异层：mod / macos / unix / windows
   icons/                  # 打包器需要的 ICO / PNG
   tauri.conf.json         # 应用基础配置
   tauri.release.conf.json # 发布期 bundle 覆盖项（tag 流水线使用）
-src-ui/                   # 零构建本地 HTML/CSS/JS：加载页、错误页、设置页
+src-ui/                   # 零构建本地 HTML/CSS/JS
+  header.html/.css/.js    # 40 DIP 标题栏：品牌、应用/视图菜单、窗口按钮
+  loading.html            # 加载页
+  error.html              # 错误页
+  settings.html           # 设置页
+  shell.css               # 三屏共用样式
 assets/                   # icon.svg 与三平台 1024×1024 占位 PNG
 scripts/                  # check.ps1 / check.sh / render-icons.ps1
 .github/workflows/        # ci.yml（三平台校验）/ release.yml（tag 发布）
@@ -130,7 +139,7 @@ docs/                     # 架构与开发文档
 ## 文档
 
 - [项目要求.md](项目要求.md) —— 目标与非目标、功能需求（FR-1..FR-11）、技术方案、平台差异矩阵、验收标准、里程碑
-- [docs/architecture.md](docs/architecture.md) —— 分层与平台差异层、启动时序、错误分类、日志位置、关键决策（ADR-001 原生窗口装饰 / ADR-002 单一 Tauri 代码线）
+- [docs/architecture.md](docs/architecture.md) —— 分层与双 webview 窗口模型、平台差异层、启动时序、错误分类、日志位置、关键决策（ADR-001..005，**当前有效的是 ADR-005**：单一 Tauri 壳 + 双 webview 标题栏）
 - [docs/development.md](docs/development.md) —— 环境准备、常用命令、调试、已知限制（GNU vs MSVC、Linux WebKitGTK 版本）
 - [CONTRIBUTING.md](CONTRIBUTING.md) —— 提交信息规范与必过检查
 
