@@ -26,16 +26,16 @@ pub const READY_PREFIX: &str = "dsh web: ";
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// Bytes of child output retained for diagnostics.
-const TAIL_BYTES: usize = 64 * 1024;
+pub(crate) const TAIL_BYTES: usize = 64 * 1024;
 
 /// Poll interval while waiting for a terminated child to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Hides the console window of a child started from a GUI process.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-type SharedTail = Arc<Mutex<Vec<u8>>>;
+pub(crate) type SharedTail = Arc<Mutex<Vec<u8>>>;
 
 /// Handle to the platform mechanism that keeps the child from outliving us.
 #[cfg(windows)]
@@ -309,7 +309,11 @@ pub fn spawn(request: &SpawnRequest, deadline: Duration) -> Result<ReadyDsh, Lau
 }
 
 /// Reads stdout lines, keeping the tail and forwarding each line to the caller.
-fn drain_stdout(stdout: std::process::ChildStdout, tail: SharedTail, lines: mpsc::Sender<String>) {
+pub(crate) fn drain_stdout(
+    stdout: std::process::ChildStdout,
+    tail: SharedTail,
+    lines: mpsc::Sender<String>,
+) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buffer = Vec::new();
@@ -331,7 +335,7 @@ fn drain_stdout(stdout: std::process::ChildStdout, tail: SharedTail, lines: mpsc
 
 /// Keeps reading stderr so the child never blocks; the caller joins the handle
 /// before reading the tail once the child is gone.
-fn drain_stderr(
+pub(crate) fn drain_stderr(
     stderr: std::process::ChildStderr,
     tail: SharedTail,
 ) -> std::thread::JoinHandle<()> {
@@ -359,7 +363,7 @@ fn push_tail(tail: &SharedTail, bytes: &[u8]) {
     }
 }
 
-fn tail_text(tail: &SharedTail) -> String {
+pub(crate) fn tail_text(tail: &SharedTail) -> String {
     match tail.lock() {
         // `cmd.exe` writes its own diagnostics in the OEM code page, so the tail
         // is decoded tolerantly instead of being assumed to be UTF-8.
@@ -424,7 +428,7 @@ impl Drop for DshChild {
 }
 
 /// Requests a normal exit and escalates to an unconditional kill after `grace`.
-fn terminate(child: &mut Child, grace: Duration) {
+pub(crate) fn terminate(child: &mut Child, grace: Duration) {
     #[cfg(unix)]
     {
         let pid = child.id() as libc::pid_t;
@@ -461,7 +465,7 @@ fn terminate(child: &mut Child, grace: Duration) {
 }
 
 /// Polls for exit until `grace` elapses.
-fn waits_within(child: &mut Child, grace: Duration) -> bool {
+pub(crate) fn waits_within(child: &mut Child, grace: Duration) -> bool {
     let started = Instant::now();
     loop {
         match child.try_wait() {
