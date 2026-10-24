@@ -127,7 +127,7 @@ impl Logger {
     fn append(&self, line: &str) {
         if let Err(error) = self.try_append(line) {
             // Logging must never take the shell down; stderr is the last resort.
-            eprintln!("dsh desktop: could not write log line: {error}");
+            eprintln!("DSH Desktop: could not write log line: {error}");
         }
     }
 
@@ -260,7 +260,7 @@ fn crash_path(dir: &Path, now: SystemTime, source: &str) -> PathBuf {
 /// Report text, redacted as a whole.
 fn crash_body(now: SystemTime, report: &CrashReport) -> String {
     let mut body = String::new();
-    body.push_str(&redact_text("dsh desktop crash report"));
+    body.push_str(&redact_text("DSH Desktop crash report"));
     body.push('\n');
     body.push_str(&format!("time: {}\n", utc_timestamp(now)));
     body.push_str(&format!("source: {}\n", report.source.as_str()));

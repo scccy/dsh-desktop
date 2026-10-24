@@ -1,4 +1,4 @@
-//! `dsh desktop` — a lightweight native shell that hosts a local `dsh web`.
+//! `DSH Desktop` — a lightweight native shell that hosts a local `dsh web`.
 //!
 //! The process is assembled in one place: parse the command line, load the
 //! configuration, open the rolling log, resolve the connection, then build the
@@ -11,6 +11,7 @@
 mod connection;
 mod lifecycle;
 mod platform;
+mod shell_server;
 mod shortcuts;
 mod state;
 mod text;
@@ -42,6 +43,21 @@ const EXIT_CONFIGURATION: i32 = 1;
 /// Exit code used when the command line is unusable.
 const EXIT_USAGE: i32 = 2;
 
+/// Removes the system WebView's default right-click menu.
+///
+/// A hosted page should not expose the WebView's own "Reload / Inspect Element /
+/// AutoFill" menu — it is not part of this product and looks broken to users.
+/// Suppressing `contextmenu` here only hides that native menu: the dsh UI's own
+/// right-click menus still work, because they call `preventDefault` and render
+/// their own UI before the event bubbles up to this document-level listener.
+const CONTEXT_MENU_SCRIPT: &str = r#"
+(function () {
+  document.addEventListener("contextmenu", function (event) {
+    event.preventDefault();
+  });
+})();
+"#;
+
 fn main() {
     let action = match dsh_lite_core::cli::parse(std::env::args().skip(1)) {
         Ok(action) => action,
@@ -64,7 +80,7 @@ fn main() {
 /// Starts the shell for one `run` invocation.
 fn run(options: RunOptions) {
     let data_dir = dsh_lite_core::config::default_config_dir()
-        .unwrap_or_else(|| std::env::temp_dir().join("dsh desktop"));
+        .unwrap_or_else(|| std::env::temp_dir().join("DSH Desktop"));
     let config_path = dsh_lite_core::config::default_config_path();
     let log_dir = data_dir.join("logs");
 
@@ -139,7 +155,23 @@ fn run(options: RunOptions) {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            let window = build_window(&handle, &state)?;
+
+            // Serve the shell's own pages over a loopback http origin that is
+            // same-site with `dsh web`, so the SameSite=Strict auth cookie
+            // survives the token redirect in a single hop (WebKit withholds it
+            // on a cross-site redirect, which `tauri://localhost` would be).
+            let shell = shell_server::start(handle.clone())?;
+            let shell_origin = shell.origin().clone();
+            {
+                let mut runtime = state.runtime();
+                runtime.shell_origin = Some(shell_origin.clone());
+                // Error/settings pages stay on the Tauri shell origin so their
+                // `invoke` works; only the bootstrap loading page uses the
+                // loopback http origin (for the same-site token handshake).
+                runtime.local_base = Some(window::default_shell_base());
+            }
+
+            let window = build_window(&handle, &state, &shell_origin)?;
             install_shell_chrome(&handle, &state, &window)?;
             attach_window_events(&handle, &window);
             lifecycle::remember_layout(&handle, &window);
@@ -185,7 +217,11 @@ fn open_logger(dir: &Path, config: &Config, options: &RunOptions) -> Logger {
 /// page or the connected `dsh web`. Splitting them is what lets the title bar
 /// stay put while the content navigates, without injecting anything into the
 /// `dsh` page.
-fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::Window> {
+fn build_window(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    shell_origin: &Url,
+) -> tauri::Result<tauri::Window> {
     let config = state.config();
     let width = 1200.0;
     let height = 800.0;
@@ -219,36 +255,40 @@ fn build_window(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<tauri::
     let navigation_state = Arc::clone(state);
     let load_handle = app.clone();
     let log_state = Arc::clone(state);
-    window.add_child(
-        tauri::webview::WebviewBuilder::new(
-            CONTENT_WEBVIEW,
-            WebviewUrl::App("loading.html".into()),
-        )
-        .on_navigation(move |url| handle_navigation(&navigation_state, url))
-        .on_page_load(move |_webview, payload| {
-            log_state.logger.debug(&format!(
-                "content page load: {:?} {}",
-                payload.event(),
-                dsh_lite_core::url_policy::redact_url(payload.url().as_str())
-            ));
-            if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                // The shortcut listener lives inside the page, so every
-                // navigation drops it: re-install on each finished load
-                // instead of once at startup.
-                if let Some(state) = load_handle.try_state::<Arc<AppState>>() {
-                    let allowed = cfg!(debug_assertions) || state.config().window.devtools;
-                    if allowed
-                        && let Some(content) = load_handle.get_webview(CONTENT_WEBVIEW)
-                        && let Err(error) = shortcuts::install(&content)
-                    {
-                        state.logger.warn(&format!(
-                            "could not install the keyboard shortcuts: {error}"
-                        ));
+    let loading_url = shell_origin
+        .join("loading.html")
+        .expect("the shell loading page URL is valid");
+    let content_builder =
+        tauri::webview::WebviewBuilder::new(CONTENT_WEBVIEW, WebviewUrl::External(loading_url))
+            .on_navigation(move |url| handle_navigation(&navigation_state, url))
+            .on_page_load(move |_webview, payload| {
+                log_state.logger.debug(&format!(
+                    "content page load: {:?} {}",
+                    payload.event(),
+                    dsh_lite_core::url_policy::redact_url(payload.url().as_str())
+                ));
+                if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                    // The shortcut listener lives inside the page, so every
+                    // navigation drops it: re-install on each finished load
+                    // instead of once at startup.
+                    if let Some(state) = load_handle.try_state::<Arc<AppState>>() {
+                        let allowed = cfg!(debug_assertions) || state.config().window.devtools;
+                        if allowed
+                            && let Some(content) = load_handle.get_webview(CONTENT_WEBVIEW)
+                            && let Err(error) = shortcuts::install(&content)
+                        {
+                            state.logger.warn(&format!(
+                                "could not install the keyboard shortcuts: {error}"
+                            ));
+                        }
                     }
+                    connection::handle_page_load(&load_handle, payload.url());
                 }
-                connection::handle_page_load(&load_handle, payload.url());
-            }
-        }),
+            })
+            .initialization_script(CONTEXT_MENU_SCRIPT);
+
+    window.add_child(
+        content_builder,
         tauri::LogicalPosition::new(0.0, content_top),
         tauri::LogicalSize::new(width, height - content_top),
     )?;
@@ -287,12 +327,17 @@ fn layout_webviews(window: &tauri::Window) {
 
 /// Decides whether a navigation stays in the window or leaves for the browser.
 fn handle_navigation(state: &Arc<AppState>, url: &Url) -> bool {
-    let target = state
-        .runtime()
-        .connection
-        .as_ref()
-        .map(|connection| connection.web_url.clone());
-    match window::classify_navigation(target.as_ref(), url) {
+    let (target, shell_origin) = {
+        let runtime = state.runtime();
+        (
+            runtime
+                .connection
+                .as_ref()
+                .map(|connection| connection.web_url.clone()),
+            runtime.shell_origin.clone(),
+        )
+    };
+    match window::classify_navigation(target.as_ref(), shell_origin.as_ref(), url) {
         window::Navigation::External => {
             state.logger.info(&format!(
                 "opening an external link in the system browser: {}",
@@ -634,9 +679,7 @@ fn menu_item<R: tauri::Runtime>(
         Some(accelerator) => builder.accelerator(accelerator),
         None => builder,
     };
-    builder
-        .build(manager)
-        .map_err(|error| error.to_string())
+    builder.build(manager).map_err(|error| error.to_string())
 }
 
 /// Pops a menu anchored under the title bar button that asked for it.
@@ -661,12 +704,7 @@ fn shell_menu(app: AppHandle, menu: String, x: f64, y: f64) -> Result<(), String
             .item(&menu_item(&app, MENU_LOGS, "打开日志目录", None)?)
             .item(&menu_item(&app, MENU_UPDATE, "检查 dsh 更新…", None)?)
             .separator()
-            .item(&menu_item(
-                &app,
-                MENU_QUIT,
-                "退出",
-                Some("CmdOrCtrl+Q"),
-            )?)
+            .item(&menu_item(&app, MENU_QUIT, "退出", Some("CmdOrCtrl+Q"))?)
             .build()
             .map_err(|error| error.to_string()),
         "view" => MenuBuilder::new(&app)
@@ -677,7 +715,7 @@ fn shell_menu(app: AppHandle, menu: String, x: f64, y: f64) -> Result<(), String
                 Some("CmdOrCtrl+R"),
             )?)
             .separator()
-            .item(&menu_item(&app, MENU_ABOUT, "关于 dsh desktop", None)?)
+            .item(&menu_item(&app, MENU_ABOUT, "关于 DSH Desktop", None)?)
             .build()
             .map_err(|error| error.to_string()),
         other => return Err(format!("unknown menu {other:?}")),
@@ -784,7 +822,7 @@ fn show_about(app: &AppHandle) {
             dsh_lite_core::PRODUCT_NAME,
             dsh_lite_core::VERSION
         ))
-        .title("关于 dsh desktop")
+        .title("关于 DSH Desktop")
         .show(|_| {});
 }
 
@@ -808,7 +846,8 @@ fn quit_shell(app: AppHandle) {
 
 #[tauri::command]
 fn retry_connection(app: AppHandle, state: State<'_, Arc<AppState>>) {
-    connection::restart(&app, state.inner());
+    let state = state.inner();
+    connection::restart(&app, state);
 }
 
 #[tauri::command]
@@ -838,7 +877,17 @@ fn return_to_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), 
             let content = app
                 .get_webview(CONTENT_WEBVIEW)
                 .ok_or_else(|| "the main window is closed".to_owned())?;
-            content.navigate(url).map_err(|error| error.to_string())
+            // Go through the same-site bridge page so the redirect to `dsh web`
+            // is not cross-site (a cross-site redirect would drop the auth
+            // cookie and show the 401 page).
+            let origin = state
+                .runtime()
+                .shell_origin
+                .clone()
+                .ok_or_else(|| "the shell server is not running".to_owned())?;
+            let mut bridge = origin.join("__bridge").map_err(|error| error.to_string())?;
+            bridge.query_pairs_mut().append_pair("to", url.as_str());
+            content.navigate(bridge).map_err(|error| error.to_string())
         }
         None => {
             connection::restart(&app, state);

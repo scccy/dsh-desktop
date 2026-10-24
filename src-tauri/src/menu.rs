@@ -1,28 +1,25 @@
 //! Native application menu for macOS.
 //!
 //! macOS reaches the shell through the menu bar and the Dock icon instead of a
-//! tray icon: the application menu carries About, Hide, Hide Others, Show All
-//! and Quit with the product name, the Window menu carries Minimize, Zoom and
-//! Bring All to Front, and the Edit menu defers to the WebView's own responder
-//! chain so undo, redo, cut, copy, paste and select all keep native behaviour.
+//! tray icon. The menu bar carries the standard application menu (About, Hide,
+//! Hide Others, Show All, Quit with the product name), a **应用** menu and a
+//! **视图** menu that mirror the Windows/Linux title-bar menus, the Edit menu
+//! (which defers to the WebView's own responder chain so undo, redo, cut, copy,
+//! paste and select all keep native behaviour) and the Window menu.
+//!
+//! Every shell item reuses the same `shell:*` id as the header menu, so the
+//! crate-wide `run_menu_entry` handles both surfaces with one code path.
 //!
 //! Tauri v2 exposes no hook for an `NSApplication` Dock menu — AppKit builds it
 //! from the `applicationDockMenu:` delegate method, which the shell cannot add
 //! to the framework's delegate — so the Dock provides the equivalent actions
-//! through the menu bar (Reload `⌘R`, Quit `⌘Q`) and a Dock icon click
-//! re-opens the window through `RunEvent::Reopen`.
+//! through the menu bar and a Dock icon click re-opens the window through
+//! `RunEvent::Reopen`.
 
-use tauri::menu::{
-    AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
-};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
-use crate::connection;
-use crate::lifecycle;
-use crate::state::AppState;
-use crate::window;
-
-/// Builds and installs the application, Edit and Window menus.
+/// Builds and installs the application, 应用, 视图, Edit and Window menus.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let product = dsh_lite_core::PRODUCT_NAME;
     let about = AboutMetadataBuilder::new()
@@ -38,19 +35,33 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .show_all()
         .separator()
         .item(
-            &MenuItemBuilder::with_id("reload", "重新加载 (Reload)")
-                .accelerator("CmdOrCtrl+R")
-                .build(app)?,
-        )
-        .item(&MenuItemBuilder::with_id("show", "显示窗口 (Show window)").build(app)?)
-        .item(&MenuItemBuilder::with_id("logs", "打开日志目录 (Open logs)").build(app)?)
-        .item(&MenuItemBuilder::with_id("settings", "打开设置 (Settings)").build(app)?)
-        .separator()
-        .item(
-            &MenuItemBuilder::with_id("quit", format!("Quit {product}"))
+            &MenuItemBuilder::with_id(crate::MENU_QUIT, format!("Quit {product}"))
                 .accelerator("CmdOrCtrl+Q")
                 .build(app)?,
         )
+        .build()?;
+
+    // Same actions as the Windows/Linux header's "应用" menu.
+    let application_menu = SubmenuBuilder::new(app, "应用")
+        .item(&MenuItemBuilder::with_id(crate::MENU_SETTINGS, "打开设置…").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id(crate::MENU_RECONNECT, "重试连接")
+                .accelerator("CmdOrCtrl+Shift+L")
+                .build(app)?,
+        )
+        .item(&MenuItemBuilder::with_id(crate::MENU_LOGS, "打开日志目录").build(app)?)
+        .item(&MenuItemBuilder::with_id(crate::MENU_UPDATE, "检查 dsh 更新…").build(app)?)
+        .build()?;
+
+    // Same actions as the header's "视图" menu.
+    let view_menu = SubmenuBuilder::new(app, "视图")
+        .item(
+            &MenuItemBuilder::with_id(crate::MENU_RELOAD, "刷新页面")
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?,
+        )
+        .separator()
+        .item(&MenuItemBuilder::with_id(crate::MENU_ABOUT, "关于 DSH Desktop").build(app)?)
         .build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -72,45 +83,11 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = MenuBuilder::new(app)
         .item(&app_menu)
+        .item(&application_menu)
+        .item(&view_menu)
         .item(&edit_menu)
         .item(&window_menu)
         .build()?;
     app.set_menu(menu)?;
-
-    app.on_menu_event(|app, event| handle_menu(app, event.id().as_ref()));
     Ok(())
-}
-
-/// Runs the action behind one menu item.
-fn handle_menu(app: &AppHandle, id: &str) {
-    let Some(state) = app.try_state::<std::sync::Arc<AppState>>() else {
-        return;
-    };
-    let state = std::sync::Arc::clone(state.inner());
-    match id {
-        "reload" => {
-            state.logger.info("reload requested from the menu bar");
-            connection::restart(app, &state);
-        }
-        "show" => lifecycle::show_main_window(app),
-        "logs" => {
-            if let Err(error) = window::open_path(&state.log_dir) {
-                state
-                    .logger
-                    .warn(&format!("could not open the log directory: {error}"));
-            }
-        }
-        "settings" => {
-            let base = state.runtime().local_base.clone();
-            connection::navigate_shell_page(app, base.as_ref(), "settings.html", &[]);
-        }
-        "quit" => lifecycle::quit(app),
-        _ => {}
-    }
-}
-
-/// Keeps `PredefinedMenuItem` in the import list of this platform build.
-#[allow(dead_code)]
-fn separator(app: &AppHandle) -> tauri::Result<PredefinedMenuItem<tauri::Wry>> {
-    PredefinedMenuItem::separator(app)
 }

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>dsh desktop — 启动失败</title>
+    <title>DSH Desktop — 启动失败</title>
     <link rel="stylesheet" href="shell.css" />
   </head>
   <body>
@@ -12,9 +12,9 @@
         <span class="mark" aria-hidden="true">d</span>
         <h1 data-role="title">启动失败</h1>
       </div>
-      <p data-role="body">dsh desktop 无法连接到 dsh。</p>
+      <p data-role="body">DSH Desktop 无法连接到 dsh。</p>
       <p class="sub" data-role="body-en" lang="en">
-        dsh desktop could not connect to dsh.
+        DSH Desktop could not connect to dsh.
       </p>
 
       <h2>下一步 / What to do</h2>
@@ -118,7 +118,7 @@
         var kind = kinds[kindName] || kinds.ready;
         var detail = params.get("detail") || "";
 
-        document.title = "dsh desktop — " + kind.title;
+        document.title = "DSH Desktop — " + kind.title;
         document.querySelector('[data-role="title"]').textContent = kind.title;
         document.querySelector('[data-role="body"]').textContent = kind.body;
         document.querySelector('[data-role="body-en"]').textContent = kind.bodyEn;

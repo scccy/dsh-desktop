@@ -6,7 +6,7 @@
     "createUpdaterArtifacts": false,
     "category": "DeveloperTool",
     "shortDescription": "Lightweight native shell for a locally installed dsh",
-    "longDescription": "dsh desktop opens the local `dsh web` GUI in a native window. It ships no runtime of its own and starts the `dsh` already installed on the machine.",
+    "longDescription": "DSH Desktop opens the local `dsh web` GUI in a native window. It ships no runtime of its own and starts the `dsh` already installed on the machine.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",

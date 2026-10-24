@@ -88,6 +88,14 @@ pub struct Runtime {
     pub local_base: Option<Url>,
     /// Tokenized URL whose token the shell is still waiting to see consumed.
     pub pending_auth: Option<Url>,
+    /// Origin (`http://127.0.0.1:<port>/`) of the read-only server that hosts
+    /// the shell's own pages.
+    ///
+    /// The pages are served over loopback http instead of `tauri://localhost` so
+    /// they are same-site with the `dsh web` server (same host; SameSite ignores
+    /// the port). That lets the `SameSite=Strict` auth cookie survive the token
+    /// redirect in a single hop, and keeps later shell↔app navigation same-site.
+    pub shell_origin: Option<Url>,
     /// Last failure, kept for the settings page.
     pub last_error: Option<ShellError>,
 }

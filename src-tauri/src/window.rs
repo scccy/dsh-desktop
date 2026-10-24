@@ -156,13 +156,18 @@ pub fn save_layout(path: &Path, layout: &WindowLayout) -> io::Result<()> {
 }
 
 /// Whether `url` belongs to the shell's own pages.
-pub fn is_shell_page(url: &Url) -> bool {
+///
+/// `shell_origin` is the loopback http origin (`http://127.0.0.1:<port>/`) that
+/// serves the shell's pages; a URL on that exact origin is a shell page too.
+pub fn is_shell_page(shell_origin: Option<&Url>, url: &Url) -> bool {
     match url.scheme() {
         "tauri" | "about" | "data" => true,
-        "http" | "https" => url
-            .host_str()
-            .map(|host| host.eq_ignore_ascii_case("tauri.localhost"))
-            .unwrap_or(false),
+        "http" | "https" => {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case("tauri.localhost"))
+                .unwrap_or(false)
+                || shell_origin.is_some_and(|origin| shares_target(origin, url))
+        }
         _ => false,
     }
 }
@@ -179,8 +184,12 @@ pub enum Navigation {
 }
 
 /// Classifies a navigation request against the current connection target.
-pub fn classify_navigation(app_target: Option<&Url>, candidate: &Url) -> Navigation {
-    if is_shell_page(candidate) {
+pub fn classify_navigation(
+    app_target: Option<&Url>,
+    shell_origin: Option<&Url>,
+    candidate: &Url,
+) -> Navigation {
+    if is_shell_page(shell_origin, candidate) {
         return Navigation::Shell;
     }
     match app_target {
@@ -218,8 +227,12 @@ pub enum PageOutcome {
 /// authenticated when the loaded URL no longer carries a token parameter. A URL
 /// that still does means the server never redirected the first hit, so the
 /// session cookie was not seeded.
-pub fn classify_page_load(pending: Option<&Url>, loaded: &Url) -> PageOutcome {
-    if is_shell_page(loaded) {
+pub fn classify_page_load(
+    pending: Option<&Url>,
+    shell_origin: Option<&Url>,
+    loaded: &Url,
+) -> PageOutcome {
+    if is_shell_page(shell_origin, loaded) {
         return PageOutcome::Shell;
     }
     if let Some(pending) = pending {
@@ -249,6 +262,17 @@ pub fn classify_page_load(pending: Option<&Url>, loaded: &Url) -> PageOutcome {
 /// Origin of the local shell pages, used until the first page load reports it.
 pub fn default_shell_base() -> Url {
     crate::platform::shell_base()
+}
+
+/// Base for the shell's pre-reconnect loading page.
+///
+/// Prefers the loopback http origin of the shell server so the following
+/// navigation to `dsh web`'s token URL stays same-site (same host; SameSite
+/// ignores the port). Falling back to `default_shell_base()` — the Tauri origin
+/// on macOS — would make that navigation cross-site and WebKit would withhold
+/// the `SameSite=Strict` auth cookie, landing on the 401 page.
+pub fn loading_page_base(shell_origin: Option<&Url>) -> Url {
+    shell_origin.cloned().unwrap_or_else(default_shell_base)
 }
 
 /// URL of a shell page relative to the origin learned from `base`.
@@ -299,6 +323,17 @@ mod tests {
 
     fn url(raw: &str) -> Url {
         Url::parse(raw).expect("valid URL")
+    }
+
+    #[test]
+    fn the_loading_page_prefers_the_loopback_shell_origin() {
+        let origin = url("http://127.0.0.1:4321/");
+        assert_eq!(loading_page_base(Some(&origin)), origin);
+    }
+
+    #[test]
+    fn the_loading_page_falls_back_to_the_built_in_shell_origin() {
+        assert_eq!(loading_page_base(None), default_shell_base());
     }
 
     fn layout(x: i32, y: i32, width: u32, height: u32) -> WindowLayout {
@@ -387,35 +422,70 @@ mod tests {
 
     #[test]
     fn shell_pages_are_recognised_on_every_platform() {
-        assert!(is_shell_page(&url("tauri://localhost/loading.html")));
-        assert!(is_shell_page(&url("http://tauri.localhost/error.html")));
-        assert!(is_shell_page(&url("about:blank")));
-        assert!(!is_shell_page(&url("http://127.0.0.1:3080/")));
-        assert!(!is_shell_page(&url("https://example.com/")));
+        assert!(is_shell_page(None, &url("tauri://localhost/loading.html")));
+        assert!(is_shell_page(
+            None,
+            &url("http://tauri.localhost/error.html")
+        ));
+        assert!(is_shell_page(None, &url("about:blank")));
+        assert!(!is_shell_page(None, &url("http://127.0.0.1:3080/")));
+        assert!(!is_shell_page(None, &url("https://example.com/")));
+
+        // The loopback http origin that hosts the shell's pages is a shell origin.
+        let shell = url("http://127.0.0.1:41234/");
+        assert!(is_shell_page(
+            Some(&shell),
+            &url("http://127.0.0.1:41234/loading.html")
+        ));
+        assert!(
+            !is_shell_page(Some(&shell), &url("http://127.0.0.1:3080/")),
+            "another port is the dsh server, not the shell"
+        );
     }
 
     #[test]
     fn only_the_connected_target_and_shell_pages_stay_in_the_window() {
         let target = url("http://127.0.0.1:3080/");
+        let shell = url("http://127.0.0.1:41234/");
         assert_eq!(
-            classify_navigation(Some(&target), &url("http://127.0.0.1:3080/workspace")),
+            classify_navigation(
+                Some(&target),
+                Some(&shell),
+                &url("http://127.0.0.1:3080/workspace")
+            ),
             Navigation::App
         );
         assert_eq!(
-            classify_navigation(Some(&target), &url("http://tauri.localhost/settings.html")),
+            classify_navigation(
+                Some(&target),
+                Some(&shell),
+                &url("http://127.0.0.1:41234/settings.html")
+            ),
             Navigation::Shell
         );
         assert_eq!(
-            classify_navigation(Some(&target), &url("https://example.com/docs")),
+            classify_navigation(
+                Some(&target),
+                None,
+                &url("http://tauri.localhost/settings.html")
+            ),
+            Navigation::Shell
+        );
+        assert_eq!(
+            classify_navigation(
+                Some(&target),
+                Some(&shell),
+                &url("https://example.com/docs")
+            ),
             Navigation::External
         );
         assert_eq!(
-            classify_navigation(Some(&target), &url("http://127.0.0.1:9999/")),
+            classify_navigation(Some(&target), Some(&shell), &url("http://127.0.0.1:9999/")),
             Navigation::External,
             "another local port is another server"
         );
         assert_eq!(
-            classify_navigation(None, &url("https://example.com")),
+            classify_navigation(None, None, &url("https://example.com")),
             Navigation::External
         );
     }
@@ -424,7 +494,7 @@ mod tests {
     fn a_page_load_with_a_consumed_token_authenticates_the_window() {
         let pending = url("http://127.0.0.1:3080/?token=secret");
         let loaded = url("http://127.0.0.1:3080/");
-        let outcome = classify_page_load(Some(&pending), &loaded);
+        let outcome = classify_page_load(Some(&pending), None, &loaded);
         assert_eq!(
             outcome,
             PageOutcome::Authenticated {
@@ -437,7 +507,8 @@ mod tests {
     fn a_page_load_that_keeps_the_token_fails_authentication() {
         let pending = url("http://127.0.0.1:3080/?token=secret");
         let loaded = url("http://127.0.0.1:3080/?token=secret");
-        let PageOutcome::AuthFailed { detail } = classify_page_load(Some(&pending), &loaded) else {
+        let PageOutcome::AuthFailed { detail } = classify_page_load(Some(&pending), None, &loaded)
+        else {
             panic!("expected an authentication failure");
         };
         assert!(
@@ -452,7 +523,7 @@ mod tests {
         let pending = url("http://127.0.0.1:3080/?token=secret");
         let loaded = url("http://127.0.0.1:9000/");
         assert!(matches!(
-            classify_page_load(Some(&pending), &loaded),
+            classify_page_load(Some(&pending), None, &loaded),
             PageOutcome::AuthFailed { .. }
         ));
     }
@@ -461,7 +532,17 @@ mod tests {
     fn a_shell_page_during_the_handshake_is_not_a_failure() {
         let pending = url("http://127.0.0.1:3080/?token=secret");
         assert_eq!(
-            classify_page_load(Some(&pending), &url("tauri://localhost/loading.html")),
+            classify_page_load(Some(&pending), None, &url("tauri://localhost/loading.html")),
+            PageOutcome::Shell
+        );
+        // The loopback shell origin is a shell page too.
+        let shell = url("http://127.0.0.1:41234/");
+        assert_eq!(
+            classify_page_load(
+                Some(&pending),
+                Some(&shell),
+                &url("http://127.0.0.1:41234/loading.html")
+            ),
             PageOutcome::Shell
         );
     }

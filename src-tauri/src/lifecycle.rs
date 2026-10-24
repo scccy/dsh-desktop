@@ -63,11 +63,9 @@ pub fn persist_layout(app: &AppHandle, state: &AppState) {
     if !state.config().window.remember_bounds {
         return;
     }
-    let layout = state.layout().or_else(|| {
-        app.get_window(MAIN_WINDOW)
-            .as_ref()
-            .and_then(window_layout)
-    });
+    let layout = state
+        .layout()
+        .or_else(|| app.get_window(MAIN_WINDOW).as_ref().and_then(window_layout));
     let Some(layout) = layout else {
         return;
     };

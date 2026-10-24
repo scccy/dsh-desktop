@@ -1,4 +1,4 @@
-//! GUI-free logic for the dsh desktop shell.
+//! GUI-free logic for the DSH Desktop shell.
 //!
 //! Every module here is independent of Tauri and of the host windowing system so
 //! that discovery, probing, URL handling and log retention are covered by plain
@@ -18,7 +18,7 @@ pub mod update;
 pub mod url_policy;
 
 /// Shell name used in diagnostics, log lines and the window title.
-pub const PRODUCT_NAME: &str = "dsh desktop";
+pub const PRODUCT_NAME: &str = "DSH Desktop";
 
 /// Shell version, reported by `--version` and settings.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

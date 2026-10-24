@@ -512,13 +512,19 @@ pub fn handle_page_load(app: &AppHandle, loaded: &Url) {
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;
     };
-    let pending = state.runtime().pending_auth.clone();
-    match classify_page_load(pending.as_ref(), loaded) {
+    let (pending, shell_origin) = {
+        let runtime = state.runtime();
+        (runtime.pending_auth.clone(), runtime.shell_origin.clone())
+    };
+    match classify_page_load(pending.as_ref(), shell_origin.as_ref(), loaded) {
         PageOutcome::Shell => {
             state
                 .logger
                 .debug(&format!("shell page loaded: {}", loaded.as_str()));
-            state.runtime().local_base = Some(loaded.clone());
+            // Do not overwrite `local_base` with the loopback http loading
+            // origin: error/settings pages must stay on the Tauri shell origin
+            // so their `invoke` works. `local_base` is seeded from
+            // `default_shell_base()` at startup.
         }
         PageOutcome::Authenticated { url } => {
             let mut runtime = state.runtime();
@@ -640,11 +646,26 @@ pub fn stop_child(state: &Arc<AppState>) {
     }
 }
 
+/// Shows the shell's loading page on the loopback http origin before a
+/// reconnect.
+///
+/// The loading page and `dsh web` share the loopback http origin (same host;
+/// SameSite ignores the port), so navigating from it to the fresh token URL is
+/// same-site and the `SameSite=Strict` auth cookie survives the token redirect.
+/// Navigating from the Tauri origin (`tauri://localhost`) instead would be
+/// cross-site and land on the 401 page. `default_shell_base()` is that Tauri
+/// origin, so it must not be used here.
+pub fn show_loading_page(app: &AppHandle, state: &Arc<AppState>) {
+    let origin = state.runtime().shell_origin.clone();
+    let base = crate::window::loading_page_base(origin.as_ref());
+    navigate_shell_page(app, Some(&base), "loading.html", &[]);
+}
+
 /// Restarts the connection with the current configuration.
 pub fn restart(app: &AppHandle, state: &Arc<AppState>) {
     stop_child(state);
     state.runtime().pending_auth = None;
-    navigate_shell_page(app, None, "loading.html", &[]);
+    show_loading_page(app, state);
     let plan = resolve_plan(&state.config(), &state.cli);
     start(app.clone(), Arc::clone(state), plan);
 }

@@ -1,8 +1,8 @@
-# dsh desktop
+# DSH Desktop
 
 面向技术用户的轻量原生桌面外壳：**不自带任何运行时**，只负责启动并承载本机已有的 `dsh web`，并把宿主机真实的系统环境交给它。
 
-- 产品名：`dsh desktop` · 可执行文件 `dsh-desktop` · 包标识 `dev.dsh.desktop`
+- 产品名：`DSH Desktop` · 可执行文件 `dsh-desktop` · 包标识 `dev.dsh.desktop`
 - 语言 / 框架：Rust + **Tauri v2**，系统 WebView（WebView2 / WKWebView / WebKitGTK），无 Chromium、无 Node 构建链
 - 平台：Windows · Linux · macOS，**同一份代码**（`src-tauri` + `crates/dsh-lite-core`）
 - 体积：二进制目标 < 10 MB，安装包目标 < 15 MB
@@ -85,6 +85,26 @@ rustup default stable-x86_64-pc-windows-msvc   # 需要已安装 VS Build Tools
 rustup default stable-x86_64-pc-windows-gnu    # 本地 MinGW
 ```
 
+### macOS 本地打包与签名（自签名证书）
+
+macOS 上双击启动的 App 若要访问**局域网**（例如 dsh 的模型网关 `192.168.31.x`），需要「本地网络」权限；而 Tauri 默认是 **ad-hoc 签名**，它的 designated requirement（DR）绑在**二进制内容哈希**上——**每次重打包签名标识都会变**，之前授予的本地网络权限就失效了（表现为「已允许却一直 Connection error」，但从终端启动又能用，因为终端已有该权限、子进程继承了它）。
+
+本机用一张**自签名 Code Signing 证书**解决：`DSH Desktop Local Signing`，存于 `~/Library/Keychains/dsh-sign.keychain-db`（密码 `dshsign`），已在用户信任域标记为代码签名。它的 DR 只绑「`identifier` + 证书」，重打包不变，本地网络授权一次即可长期生效。
+
+```sh
+# 一键出「已签名」的 dmg（App 在打包阶段就用自签名证书签好，再封 dmg）
+./scripts/build-local-macos.sh
+# 等价于：
+APPLE_SIGNING_IDENTITY="DSH Desktop Local Signing" cargo tauri build --bundles dmg
+
+# 给已存在的 .app 补签（备用）
+./scripts/sign-local.sh "/Applications/DSH Desktop.app"
+```
+
+- **仅限本机自用**：自签名证书别人机器不信任，不能分发。
+- **对外发版**用 **Developer ID 签名 + 公证**：`release.yml` 在 `v*` tag 上跑 `cargo tauri build`，配好 `APPLE_CERTIFICATE` / `APPLE_CERTIFICATE_PASSWORD` / `APPLE_SIGNING_IDENTITY` / `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` 这些 secrets，即为已签名、已公证的 dmg。
+- 若首次双击仍提示无网络：系统设置 → 隐私与安全性 → **本地网络**，把 `DSH Desktop` 开关一次（或允许弹窗），⌘Q 重开即可。
+
 ### 验证清单
 
 改动合入前至少确认：
@@ -131,7 +151,7 @@ src-ui/                   # 零构建本地 HTML/CSS/JS
   settings.html           # 设置页
   shell.css               # 三屏共用样式
 assets/                   # icon.png（1024 透明圆角设计源）与 icon-macos.png（内缩版）
-scripts/                  # check.ps1 / check.sh / render-icons.ps1
+scripts/                  # check.ps1 / check.sh / render-icons.ps1 / build-local-macos.sh / sign-local.sh
 .github/workflows/        # ci.yml（三平台校验）/ release.yml（tag 发布）
 docs/                     # 架构与开发文档
 ```

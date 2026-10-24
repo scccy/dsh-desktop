@@ -72,7 +72,7 @@ impl std::error::Error for CliError {}
 
 /// Usage text printed by `--help` and after a parse error.
 pub const HELP: &str = "\
-dsh desktop - a lightweight native shell for a locally installed dsh
+DSH Desktop - a lightweight native shell for a locally installed dsh
 
 Usage:
   dsh-desktop [--url <url>] [--port <n>] [--dsh-path <path>] [--profile <name>]
