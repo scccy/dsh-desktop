@@ -192,11 +192,11 @@
 
 - 官方 `dsh --profile desktop` 被 CLI 硬拦，启动器改走内部 `runProfile({ profile: "desktop" })`（与官方 `apps/desktop-host` 同路）；
 - **必须注入 `DSH_CLIENT_VERSION`**：`packages/bundle/web-app/cordis.patch.yml` 里 `serviceVersion: !!js process.env.DSH_CLIENT_VERSION`，缺失时 `desktop-product-telemetry` 校验失败、启动中止；
-- 全局 dsh `0.2.0-rc.2` 的 `webServer.protocol` 为 `undefined`（官方内置的 `0.2.1-rc.3` 才有），启动器兜底 `http:`；
-- `ready` 实际返回 `url` + **12 条 `injections`**；`stdin` 写 `shutdown` 可优雅退出（exit 0）；
-- stdout 协议：`DSH_HOST_READY <json>` / `DSH_HOST_FATAL <json>`，诊断走 stderr；
+- 全局 dsh **`0.2.1-rc.2` 已提供 `webServer.protocol`**（返回 `http:`）；`0.2.0-rc.2` 上该属性为 `undefined`，启动器保留 `?? "http:"` 兜底以兼容旧版；
+- `ready` 实际返回 `url` + **13 条 `injections`**（`0.2.0-rc.2` 为 12 条）；
+- `stdin` 写 `shutdown` 可优雅退出（exit 0）；stdout 协议：`DSH_HOST_READY <json>` / `DSH_HOST_FATAL <json>`，诊断走 stderr；
 - Rust 侧已接入 `dsh-lite-core::desktop_host`（spawn / 解析 / 优雅停止，进程组随 Rust 生命周期回收），并加了 `tests/desktop_host_e2e.rs`（默认 ignore）做真机端到端；
-- 已知差异：全局 dsh 未安装 `@deepseek-ai/dsh-experimental-plugin-market-bundle`，启动时该 bundle 被跳过（官方是内置的）；不影响 Host 启动，后续在插件安装/打包阶段补齐。
+- marketplace bundle：`0.2.0-rc.2` 下 `@deepseek-ai/dsh-experimental-plugin-market-bundle` 会因解析不到被跳过；**`0.2.1-rc.2` 已不再跳过**。
 
 ## 8. 决策（全部对齐官方，不抄近路）
 
