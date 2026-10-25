@@ -247,6 +247,13 @@ fn start_connection(handle: AppHandle, state: Arc<AppState>) {
         connection::start(handle, state, plan);
         return;
     }
+    if config.dsh.web_fallback {
+        // `profile = "web"` keeps the legacy single-layer path: attach to a
+        // `dsh --profile web` process instead of the Desktop Host.
+        let plan = connection::resolve_plan(&config, &state.cli);
+        connection::start(handle, state, plan);
+        return;
+    }
 
     {
         let mut runtime = state.runtime();
@@ -265,6 +272,35 @@ fn start_connection(handle: AppHandle, state: Arc<AppState>) {
                 Err(error) => connection::fail(&handle, &state, error),
             },
         )
+        .ok();
+}
+
+/// Tears the current stack down and starts it again (reconnect, profile switch).
+///
+/// Runs off the UI thread: stopping the Host may take several seconds.
+fn restart_stack(app: &AppHandle, state: &Arc<AppState>) {
+    let handle = app.clone();
+    let state = Arc::clone(state);
+    thread::Builder::new()
+        .name("desktop-restart".into())
+        .spawn(move || {
+            if let Some(content) = handle.get_webview(CONTENT_WEBVIEW)
+                && let Ok(loading) = Url::parse("dsh-app://shell/loading.html")
+            {
+                let _ = content.navigate(loading);
+            }
+            connection::stop_child(&state);
+            app_runtime::stop(&state);
+            {
+                let mut runtime = state.runtime();
+                runtime.app = None;
+                runtime.host = None;
+                runtime.connection = None;
+                runtime.pending_auth = None;
+                runtime.status = Status::Idle;
+            }
+            start_connection(handle, state);
+        })
         .ok();
 }
 
@@ -715,6 +751,7 @@ fn save_settings(state: State<'_, Arc<AppState>>, settings: SettingsPayload) -> 
     let state = state.inner();
     let mut config = state.config();
     config.dsh.profile = settings.profile.trim().to_owned();
+    config.dsh.web_fallback = config.dsh.profile.trim() == "web";
     config.connect.mode = parse_connect_mode(&settings.connect_mode)?;
     if let Some(url) = &settings.url {
         config.connect.url = url.trim().to_owned();
@@ -890,7 +927,11 @@ fn run_menu_entry(app: &AppHandle, id: &str) {
         }
         MENU_RECONNECT => {
             if let Some(state) = app.try_state::<Arc<AppState>>() {
-                connection::restart(app, state.inner());
+                if !state.config().dsh.web_fallback {
+                    restart_stack(app, state.inner());
+                } else {
+                    connection::restart(app, state.inner());
+                }
             }
         }
         MENU_LOGS => {
@@ -997,7 +1038,11 @@ fn quit_shell(app: AppHandle) {
 #[tauri::command]
 fn retry_connection(app: AppHandle, state: State<'_, Arc<AppState>>) {
     let state = state.inner();
-    connection::restart(&app, state);
+    if !state.config().dsh.web_fallback {
+        restart_stack(&app, state);
+    } else {
+        connection::restart(&app, state);
+    }
 }
 
 #[tauri::command]
@@ -1005,18 +1050,26 @@ fn use_web_profile(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()
     let state = state.inner();
     let mut config = state.config();
     config.dsh.profile = "web".to_owned();
+    config.dsh.web_fallback = true;
     if let Some(path) = state.config_path.clone() {
         write_config(&path, &config)?;
     }
     state.replace_config(config);
     state.logger.info("switched to the built-in web profile");
-    connection::restart(&app, state);
+    restart_stack(&app, state);
     Ok(())
 }
 
 #[tauri::command]
 fn return_to_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner();
+    if state.runtime().app.is_some() {
+        let content = app
+            .get_webview(CONTENT_WEBVIEW)
+            .ok_or_else(|| "the main window is closed".to_owned())?;
+        let target = Url::parse("dsh-app://app/").expect("the application origin is a valid URL");
+        return content.navigate(target).map_err(|error| error.to_string());
+    }
     let target = state
         .runtime()
         .connection

@@ -807,12 +807,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_configuration_starts_a_managed_dsh() {
+    fn the_default_configuration_resolves_to_the_desktop_profile() {
         let plan = resolve_plan(&config(), &options()).expect("plan");
         let ConnectionPlan::Spawn(spawn) = plan else {
             panic!("expected a managed spawn");
         };
-        assert_eq!(spawn.profile, "web");
+        assert_eq!(spawn.profile, "desktop");
         assert_eq!(spawn.port, 0);
         assert!(spawn.env_probe.inherit);
     }

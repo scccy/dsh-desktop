@@ -92,8 +92,15 @@ impl Default for ConnectConfig {
 pub struct DshConfig {
     /// Explicit `dsh` executable; empty means the discovery order in [`crate::dsh_locate`].
     pub path: String,
-    /// Profile passed to `dsh --profile`; the built-in `web` template by default.
+    /// Profile name shown to the user; `desktop` is the three-layer stack.
     pub profile: String,
+    /// Whether the shell runs the legacy single-layer `dsh --profile web` path.
+    ///
+    /// This is separate from [`DshConfig::profile`] so configuration files
+    /// written before the three-layer stack (which recorded `profile = "web"`
+    /// as the old default) keep booting the desktop stack after an upgrade: the
+    /// Desktop Host is the default unless the user explicitly opted out.
+    pub web_fallback: bool,
     /// Readiness deadline for the `dsh web:` line.
     pub start_timeout_ms: u64,
     /// Extra arguments appended to the `dsh` command line.
@@ -104,7 +111,8 @@ impl Default for DshConfig {
     fn default() -> Self {
         Self {
             path: String::new(),
-            profile: "web".to_owned(),
+            profile: "desktop".to_owned(),
+            web_fallback: false,
             start_timeout_ms: 120_000,
             extra_args: Vec::new(),
         }
@@ -237,7 +245,8 @@ port = 0                # 0 = 由 OS 分配；>0 时透传 --port
 
 [dsh]
 path = ""               # 空 = 按 FR-1 顺序探测
-profile = "web"         # 内置模板名，或已存在的自定义 profile
+profile = "desktop"     # 展示用名称；三层桌面栈由 webFallback 决定
+webFallback = false     # true = 旧单层 dsh --profile web 路径
 startTimeoutMs = 120000
 extraArgs = []          # 追加到 dsh 命令行（高级）
 
@@ -400,7 +409,8 @@ mod tests {
         let config = Config::parse(DEFAULT_CONFIG_TOML, None).expect("default file parses");
         assert_eq!(config, Config::default());
         assert_eq!(config.connect.mode, ConnectMode::Spawn);
-        assert_eq!(config.dsh.profile, "web");
+        assert_eq!(config.dsh.profile, "desktop");
+        assert!(!config.dsh.web_fallback);
         assert_eq!(config.dsh.start_timeout_ms, 120_000);
         assert_eq!(config.env.timeout_ms, 10_000);
         assert!(config.env.inherit);

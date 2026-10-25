@@ -48,6 +48,8 @@ dsh-desktop
 
 # 附着到已在运行 / 由终端启动的实例（旧的单层路径，仍保留）
 dsh-desktop --url "<dsh web: 行里给出的完整 URL>"
+# 想长期回到旧单层路径：把 config.toml 的 [dsh] webFallback 改成 true
+# （设置页把 profile 写成 web 时也会自动置位）
 ```
 
 - 默认启动顺序：定位全局 `dsh` → 最低版本校验 → 登录 shell 环境探针 → 起 Desktop Host（`runProfile({profile:"desktop"})`）→ 用一次性 token URL 换 cookie → 起回环 app server（静态 dist + 流式 HTTP/WS 代理 + CORS）→ 窗口加载 `dsh-app://app/` → preload 桥交付 injections 与 `streamBaseUrl`；
