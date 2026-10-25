@@ -16,6 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use dsh_lite_core::config::Platform;
 use dsh_lite_core::url_policy::{is_loopback_http, redact_url, shares_target, token_of};
 
 /// Label of the single main window.
@@ -54,6 +55,51 @@ pub const MIN_WIDTH: u32 = 640;
 
 /// Smallest window height the shell allows.
 pub const MIN_HEIGHT: u32 = 480;
+
+/// Where the macOS traffic lights sit, in logical pixels from the window's
+/// top-left corner.
+///
+/// The official shell passes `trafficLightPosition: { x: 16, y: 18 }` to
+/// `BrowserWindow` (`apps/desktop/src/main.ts`, macOS branch of `createWindow`).
+/// Tauri v2 only exposes the equivalent on `WebviewWindowBuilder`, which a bare
+/// window with a child content webview cannot use, so `platform::apply_window_chrome`
+/// applies this natively through AppKit (and moves the buttons through
+/// `convertRect:toView:` so the flipped title-bar space never leaks into the maths).
+pub const MACOS_TRAFFIC_LIGHT_POSITION: (f64, f64) = (16.0, 18.0);
+
+/// macOS sidebar material, the official `vibrancy: 'sidebar'`.
+pub const MACOS_VIBRANCY_MATERIAL: &str = "sidebar";
+
+/// Material state, the official `visualEffectState: 'active'`: the material stays
+/// put when the window loses focus, while the default washes the sidebar out.
+pub const MACOS_VISUAL_EFFECT_STATE: &str = "active";
+
+/// Whether the window background is opaque; the material needs it transparent
+/// (official `backgroundColor: '#00000000'`).
+pub const MACOS_OPAQUE_BACKGROUND: bool = false;
+
+/// One-line description of the window chrome, written into the startup log.
+///
+/// The acceptance run compares the real window against these numbers, and a log
+/// line is the only place the shell can state what it asked the window manager
+/// for — neither Tauri nor AppKit can be queried for "which traffic-light inset
+/// did you apply".
+pub fn chrome_summary(platform: Platform) -> String {
+    match platform {
+        Platform::MacOs => format!(
+            "hiddenInset, traffic lights at x{} y{}, vibrancy {} (state {}, opaque background {})",
+            MACOS_TRAFFIC_LIGHT_POSITION.0,
+            MACOS_TRAFFIC_LIGHT_POSITION.1,
+            MACOS_VIBRANCY_MATERIAL,
+            MACOS_VISUAL_EFFECT_STATE,
+            MACOS_OPAQUE_BACKGROUND,
+        ),
+        _ => format!(
+            "custom {} DIP header webview above the content, system window buttons",
+            HEADER_HEIGHT
+        ),
+    }
+}
 
 /// Width and height of the window that must remain on a monitor.
 const MIN_VISIBLE: u32 = 96;
@@ -335,6 +381,22 @@ mod tests {
     fn the_loading_page_prefers_the_loopback_shell_origin() {
         let origin = url("http://127.0.0.1:4321/");
         assert_eq!(loading_page_base(Some(&origin)), origin);
+    }
+
+    #[test]
+    fn the_macos_chrome_matches_the_official_window_options() {
+        assert_eq!(MACOS_TRAFFIC_LIGHT_POSITION, (16.0, 18.0));
+        assert_eq!(MACOS_VIBRANCY_MATERIAL, "sidebar");
+        assert_eq!(
+            MACOS_VISUAL_EFFECT_STATE, "active",
+            "the material must not follow the window focus"
+        );
+        const { assert!(!MACOS_OPAQUE_BACKGROUND) };
+        let summary = chrome_summary(Platform::MacOs);
+        assert!(summary.contains("x16"), "{summary}");
+        assert!(summary.contains("sidebar"), "{summary}");
+        assert!(!summary.contains("header"), "{summary}");
+        assert!(chrome_summary(Platform::Windows).contains("40 DIP"));
     }
 
     #[test]

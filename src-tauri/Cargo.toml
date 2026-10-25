@@ -28,3 +28,73 @@ url = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "image-png", "unstable", "devtools"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
+
+# Microphone capture (P3). WKWebView implements no Media Capture, so the shell
+# records with AVFoundation and feeds the page a synthetic MediaStream (see
+# docs/desktop-parity.md §9). The bindings are pure Rust glue: no build script,
+# no Objective-C source, and the versions line up with the `objc2` 0.6 /
+# `objc2-foundation` 0.3.2 already in the lockfile.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "alloc",
+  "AVFCapture",
+  "AVCaptureSession",
+  "AVCaptureSessionPreset",
+  "AVCaptureDevice",
+  "AVCaptureInput",
+  "AVCaptureOutput",
+  "AVCaptureOutputBase",
+  "AVCaptureAudioDataOutput",
+  "AVMediaFormat",
+  # Delegate plumbing used by AVCaptureAudioDataOutput: a `block2` completion
+  # handler for the TCC request and a `dispatch2` serial queue for the sample
+  # buffers, plus the CoreMedia types that arrive through it.
+  "block2",
+  "dispatch2",
+  "objc2-core-media",
+  "objc2-core-audio-types",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "alloc",
+  "CMBase",
+  "CMSampleBuffer",
+  "CMBlockBuffer",
+  "CMFormatDescription",
+  # Gates `CMSampleBuffer::audio_buffer_list_with_retained_block_buffer` and
+  # `CMAudioFormatDescriptionGetStreamBasicDescription`, i.e. the two calls that
+  # turn a captured buffer into PCM.
+  "objc2-core-audio-types",
+] }
+# Sample-buffer delegates need a serial dispatch queue; `objc2-av-foundation`
+# accepts `dispatch2` 0.3.
+dispatch2 = "0.3"
+# `media/macos.rs` declares the `AVCaptureAudioDataOutput` delegate class
+# (`define_class!`), the TCC completion handler (`RcBlock`) and unboxes the
+# `AudioBufferList` out of a `CMSampleBuffer`. All three resolve to versions the
+# lockfile already had, and none of them runs a build script.
+objc2 = "0.6"
+objc2-core-audio-types = "0.3.2"
+block2 = "0.6"
+# macOS window material and traffic-light placement (P4 polish). Tauri's public
+# API only exposes `traffic_light_position` on `WebviewWindowBuilder`, and this
+# shell builds a bare window with child webviews, so both are applied directly
+# through AppKit. `window-vibrancy` is the Tauri-maintained wrapper for
+# `NSVisualEffectView`.
+window-vibrancy = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  # `NSWindowButton` (the traffic-light enum) ships inside the `NSWindow` module;
+  # `standardWindowButton(_:)` is additionally gated on NSButton + NSControl +
+  # NSView, and `setFrameOrigin` needs NSView.
+  "NSWindow",
+  "NSResponder",
+  "NSButton",
+  "NSControl",
+  "NSView",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSGeometry",
+] }

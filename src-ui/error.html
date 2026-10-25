@@ -68,9 +68,9 @@
           },
           version: {
             title: "dsh 版本过低 (dsh is too old)",
-            body: "已安装的 dsh 不在支持的版本范围内（>= 0.2.0，< 1.0.0）。",
+            body: "已安装的 dsh 低于桌面壳要求的最低版本。",
             bodyEn:
-              "The installed dsh is outside the supported range (>= 0.2.0, < 1.0.0).",
+              "The installed dsh is older than the desktop shell's minimum.",
             steps: ["升级 dsh：npm install -g @deepseek-ai/dsh@latest"],
             command: "npm install -g @deepseek-ai/dsh@latest",
             webProfile: false,
@@ -115,6 +115,23 @@
 
         var params = new URLSearchParams(window.location.search);
         var kindName = params.get("kind") || "ready";
+        // The version gate is the only authority on the supported range, so the
+        // shell passes its real minimum version and upgrade command. This page
+        // must never claim a range the gate does not enforce.
+        var minimum = params.get("min") || "";
+        var upgrade = params.get("upgrade") || "";
+        if (minimum) {
+          kinds.version.body =
+            "已安装的 dsh 低于桌面壳要求的最低版本 " + minimum + "。";
+          kinds.version.bodyEn =
+            "The installed dsh is older than the desktop shell's minimum, " +
+            minimum +
+            ".";
+        }
+        if (upgrade) {
+          kinds.version.command = upgrade;
+          kinds.version.steps = ["升级 dsh：" + upgrade];
+        }
         var kind = kinds[kindName] || kinds.ready;
         var detail = params.get("detail") || "";
 

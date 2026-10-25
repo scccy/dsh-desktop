@@ -584,6 +584,10 @@ pub fn fail(app: &AppHandle, state: &Arc<AppState>, error: ShellError) {
         &[
             ("kind", error.kind.as_str()),
             ("detail", error.detail.as_str()),
+            // The version gate owns the supported range; the page states whatever
+            // this build enforces instead of a range baked into the HTML.
+            ("min", dsh_lite_core::version_gate::MINIMUM_VERSION),
+            ("upgrade", dsh_lite_core::version_gate::UPGRADE_COMMAND),
         ],
     );
 }
@@ -945,11 +949,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_higher_release_counts_as_an_update() {
+    fn only_a_higher_version_counts_as_an_update() {
         assert!(update_is_newer("0.2.2", "0.2.1-rc.2"));
         assert!(update_is_newer("0.3.0", "0.2.9"));
         assert!(update_is_newer("1.0.0", "0.9.9"));
-        assert!(!update_is_newer("0.2.1", "0.2.1-rc.2"));
+        // Semver precedence: a release outranks its own pre-releases, and a
+        // later pre-release outranks an earlier one.
+        assert!(update_is_newer("0.2.1", "0.2.1-rc.2"));
+        assert!(update_is_newer("0.2.1-rc.3", "0.2.1-rc.2"));
         assert!(!update_is_newer("0.1.9", "0.2.0"));
         assert!(!update_is_newer("not a version", "0.2.0"));
         assert!(!update_is_newer("0.2.2", "unknown"));

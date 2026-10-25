@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Partial Info.plist merged into the bundled app by Tauri (bundle macOS).
+
+  It declares the `dsh` URL scheme, which is what makes `open dsh://open`
+  reach the running instance: LaunchServices delivers the URL to the app, and
+  Tauri surfaces it as `RunEvent::Opened { urls }`. The official Electron shell
+  does the same thing at runtime through `setAsDefaultProtocolClient('dsh')`,
+  which on macOS only works from a bundled app anyway.
+
+  Keep this file to bundle-level keys only: version, identifier and icon come
+  from tauri.conf.json.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.dsh.desktop</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>dsh</string>
+      </array>
+    </dict>
+  </array>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>dsh desktop 需要麦克风来把语音输入转成文字；录音只在你按下语音按钮时开始。</string>
+</dict>
+</plist>

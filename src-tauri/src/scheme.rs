@@ -213,10 +213,18 @@ fn respond(
         return status(StatusCode::NOT_FOUND);
     };
     match route {
+        // A missing (or unreadable) shell document would otherwise be an empty
+        // 404 — a white window that explains nothing. Serve the built-in
+        // document instead: it names the page that is missing and what to do.
         Route::Shell => match shell_page(shell, &pathname) {
             Some(asset) => document_response(&asset.content_type, asset.body, head_only),
-            None => status(StatusCode::NOT_FOUND),
+            None => fallback_document(StatusCode::NOT_FOUND, &pathname, head_only),
         },
+        Route::Index if target.is_none() => {
+            // The renderer document without a resolved dist directory: the boot
+            // never got far enough to have one. Still a page, not a blank window.
+            fallback_document(StatusCode::SERVICE_UNAVAILABLE, &pathname, head_only)
+        }
         Route::Index | Route::Asset => {
             let Some(target) = target else {
                 return status(StatusCode::SERVICE_UNAVAILABLE);
@@ -234,6 +242,53 @@ fn respond(
             proxy(host, request, head_only)
         }
     }
+}
+
+/// Built-in document served when a document the shell itself should provide is
+/// missing.
+///
+/// Its whole reason to exist is that the alternative is an empty response: the
+/// WebView then shows a white window with no title, no explanation and nothing
+/// in the log that points at the real problem (a damaged installation). The page
+/// is self-contained — no stylesheet, no script, no `invoke` — because whatever
+/// is missing may well be the stylesheet.
+fn fallback_document(status: StatusCode, pathname: &str, head_only: bool) -> Response<Vec<u8>> {
+    // The path comes straight from the request, so it is escaped before it is
+    // interpolated: an error page must never be a way to inject markup.
+    let pathname = html_escape(pathname);
+    let body = format!(
+        "<!doctype html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\n\
+         <title>DSH Desktop — 页面缺失 / Page missing</title>\n\
+         <style>body{{font:14px/1.6 -apple-system,system-ui,sans-serif;margin:0;padding:48px;color:#17181b;background:#f9fafb}}\n\
+         h1{{font-size:18px;margin:0 0 12px}}code{{background:#eceef1;padding:1px 4px;border-radius:3px}}\n\
+         p{{margin:0 0 8px;max-width:60ch}}.sub{{color:#5b616b}}</style></head><body>\n\
+         <h1>DSH Desktop 的页面缺失 / A DSH Desktop page is missing</h1>\n\
+         <p>壳没有取到它自己的文档 <code>{pathname}</code>。这通常意味着安装不完整。</p>\n\
+         <p class=\"sub\">The shell could not read its own document <code>{pathname}</code>.\n\
+         This usually means the installation is incomplete.</p>\n\
+         <p>请重新安装 DSH Desktop；日志在应用数据目录的 <code>logs/</code> 下。</p>\n\
+         <p class=\"sub\">Reinstall DSH Desktop. Logs are in <code>logs/</code> under the application data directory.</p>\n\
+         </body></html>\n"
+    );
+    let mut response = document_response("text/html; charset=utf-8", body.into_bytes(), head_only);
+    *response.status_mut() = status;
+    response
+}
+
+/// Escapes the five characters that matter inside HTML text and attributes.
+fn html_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Resolves a shell page, refusing anything that is not a flat document name.
@@ -866,6 +921,44 @@ mod tests {
         };
         let response = respond(None, &erroring, &get("dsh-app://shell/error.html"));
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_missing_shell_document_is_a_readable_page_not_a_white_window() {
+        let response = respond(None, &no_shell, &get("dsh-app://shell/error.html"));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = String::from_utf8(response.body().clone()).expect("utf-8");
+        assert!(body.contains("error.html"), "the page names it: {body}");
+        assert!(body.contains("</html>"));
+        assert!(
+            !body.contains("<script"),
+            "the fallback must not depend on anything that may be missing too"
+        );
+    }
+
+    #[test]
+    fn the_renderer_document_without_a_target_still_renders_a_page() {
+        let response = respond(None, &no_shell, &get("dsh-app://app/"));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8(response.body().clone()).expect("utf-8");
+        assert!(body.contains("</html>"));
+    }
+
+    #[test]
+    fn the_fallback_page_sends_no_body_for_a_head_request() {
+        let request = Request::builder()
+            .method(Method::HEAD)
+            .uri("dsh-app://shell/error.html")
+            .body(Vec::new())
+            .expect("request");
+        let response = respond(None, &no_shell, &request);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.body().is_empty());
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_some());
     }
 
     #[test]

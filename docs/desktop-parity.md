@@ -1,6 +1,6 @@
 # 与官方 Desktop 对齐的开发目标
 
-> 状态：**P1 + P2 已落地并真机验收（2026-10-25）**；P3 原生能力与 P4 收尾待做。本文只定义「要做什么、为什么、边界和验收」，不锁定实现细节；
+> 状态：**P0–P3 已落地**（P1/P2 真机验收 2026-10-25，P3 原生能力同日合入）；**P4 收尾剩 macOS 材质/红绿灯精调与 Windows/Linux 真机复验**。本文只定义「要做什么、为什么、边界和验收」，不锁定实现细节；
 > 具体实现决策落地后，回填到 [architecture.md](architecture.md) 的 ADR 与本文的阶段记录。
 >
 > 参考实现：官方源码 `apps/desktop`（路径 `/Volumes/project/github/dsh/deepseek-harness/apps/desktop`）。
@@ -186,8 +186,8 @@ P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallb
 | **P0 Host 启动器** | ✅ 完成 | Node 启动器调 `runProfile({profile:"desktop"})`，补配置注入；登录 shell 探针注入环境；`dsh --version` 校验；stdout 回报 `url`+`injections` | 终端能起 Host 并打印可用 url；`curl` 能拿到前端 index；GUI 启动能拿到 shell 导出变量 |
 | **P1 `dsh-app://` + 代理** | ✅ 完成 | 注册 scheme，静态 dist 从安装读取，HTTP 代理到 Host；WS 用 Rust 代理（主进程持 cookie 注入） | 主窗口从 `dsh-app://app/` 加载，登录、对话、流式回复可用 |
 | **P2 preload 桥** | ✅ 完成 | init script 实现 `dshDesktop`（先 keyboard/shortcuts/deviceInfo）+ `dshDesktopBoot` + `data-platform` | 客户端不再报 `Desktop keyboard bridge unavailable`；快捷键可用；两块头部出现 |
-| **P3 原生能力** | ⬜ 未开始 | 目录选择、文件拖放、麦克风、更新、深链 `dsh://open`、托盘、退出确认、内嵌浏览器（子 webview） | 每项一个手工验收用例 |
-| **P4 收尾** | 🟡 部分 | 独占 `profiles/desktop`、错误页/版本提示、文档与 ADR 回填 | 全局 dsh 版本不足/缺失时有明确错误页；架构文档更新 |
+| **P3 原生能力** | ✅ 完成（缺项见 §7.3） | 目录选择、文件拖放、麦克风、更新、深链 `dsh://open`、托盘、退出确认、崩溃报告、内嵌浏览器（子 webview） | 每项一个手工验收用例（见 §7.3 表） |
+| **P4 收尾** | 🟡 部分 | 独占 `profiles/desktop` ✅、错误页/版本提示 ✅、EventSource shim ✅、文档与 ADR 回填 ✅、macOS 材质/红绿灯精调 ⬜、Windows/Linux 真机复验 ⬜ | 全局 dsh 版本不足/缺失时有明确错误页；架构文档更新 |
 
 ### 7.1 P0 进展（已验证）
 
@@ -234,7 +234,31 @@ P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallb
 
 **门禁**：`cargo test --workspace` **281 passed**；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 干净。
 
-**尚未完成（P3/P4）**：麦克风（需原生 AVCaptureSession 采集）、内嵌浏览器（子 webview + `<webview>` 兼容层）、深链 `dsh://open`、退出确认、崩溃报告、macOS vibrancy/红绿灯位置精调、Windows/Linux 真机验证、EventSource shim（当前 dev-only）、`__DSH_HOST_PATHS__`（Tauri 无 `webUtils`）。
+**当时（P1/P2 验收时）尚未完成、已在 §7.3 落地的项**：麦克风、内嵌浏览器、深链 `dsh://open`、退出确认、崩溃报告、macOS vibrancy/红绿灯、EventSource shim；仍缺的见 §9（`__DSH_HOST_PATHS__`、Windows/Linux 真机复验等）。
+
+### 7.3 P3 + P4 进展（2026-10-25）
+
+P3 能力项与 P4 收尾项在同一轮落地，逐项证据如下。
+
+| 能力 | 实现位置 | 状态与证据 |
+|---|---|---|
+| 深链 `dsh://open` | `platform/deeplink.rs`（`classify` / `first_open` / 各平台注册载荷）、`platform/{macos,windows,unix}.rs`、`lifecycle::handle_deep_link`、`src-tauri/Info.plist` | ✅ 唯一语义对齐官方：**只把主窗口叫回前台**，不导航、不建窗、无路由表；其它 `dsh://*` 记日志后忽略。macOS 走 bundle `Info.plist` 的 `CFBundleURLTypes` + `RunEvent::Opened`（= Electron `open-url`）；Windows 写 `HKCU\Software\Classes\dsh`；Linux 写 `.desktop`（`MimeType=x-scheme-handler/dsh`）+ `xdg-mime` |
+| 单实例 | `lifecycle::handle_second_instance`、`main.rs::on_second_instance` | ✅ 第二次启动聚焦已有窗口，argv 里的 `dsh://open` 一并消费（官方 `single-instance.ts` 只 focus，URL 由 Electron 从 argv 自己找） |
+| 托盘 | `tray.rs` | ✅ 点击 = 打开并聚焦（原实现是与官方相反的 toggle）；菜单首项「打开」、末项「退出」；退出统一走确认 |
+| 退出确认 | `lifecycle::{quit,resolve_quit_prompt,inspect_quit}` + `desktop_host::inspect_quit` | ✅ Host 行协议 `{"type":"quit-inspection"}` → `DSH_HOST_CONTROL`；2 s 超时 / Host 不可用 / 巡检拒绝一律按 `unknown`（= 按有活动任务警告），绝不静默退出；一次只允许一个决定、重复请求合并、取消则保持运行 |
+| 关闭策略 | `lifecycle::{close_decision,hide_to_background}` | ✅ 保留 FR-5 默认（macOS 隐藏、Win/Linux 退出）+ 官方一次性后台提示（marker `background-notice-shown`）。与官方「close 永远 hide」的差异见 §9 |
+| 崩溃报告 / 致命恢复 | `lifecycle::{report_fatal,install_panic_hook,recovery_detail,error_chain}` + `logging::write_crash_report` | ✅ 先落盘再弹框；文件名 `crash-<UTC>-<source>.log`、token 脱敏、只保留最近 10 份（复用既有 `prune_crash_reports`）；对话框只显示错误尾部 8 行 + 报告路径 + Exit/Restart |
+| 错误页 / 版本闸门 | `scheme.rs`（内置错误文档）、`connection::fail`（`min` / `upgrade` 查询参数）、`src-ui/error.html` | ✅ `dsh-app://shell/*` 缺页返回内置错误文档（原来是空 404/503，表现为白屏）；`dsh-app://app/` 无 target 同理降级；版本页文案改为读 `version_gate::MINIMUM_VERSION` / `UPGRADE_COMMAND`，不再写死「>= 0.2.0, < 1.0.0」 |
+| 内嵌浏览器 | `src-tauri/src/browser/`（lease / partition / policy / history / guest / commands）+ `bridge/webview-shim.js` | ✅ Tauri 子 webview 承载 guest；`<webview>` 元素的几何/可见性与层级同步；lease 租约与归属校验；workspace → 持久分区；导航/新窗口/下载/权限四条策略；决策见 [architecture.md ADR-007](architecture.md)。**默认 `[dsh] browserGuests = false`**，真机验收通过后再打开 |
+| 麦克风 | `src-tauri/src/media/`（pcm / permission / session / macos）+ `bridge/media-shim.js` | ✅ AVCaptureSession 采集 → 20 ms / 48 kHz / 单声道 f32 → `Channel` 二进制帧 → 页面 `ScriptProcessorNode` + `MediaStreamAudioDestinationNode` 合成 MediaStream 冒充 `getUserMedia`；决策见 [architecture.md ADR-008](architecture.md) |
+| EventSource | `bridge/media-shim.js` | ✅ 相对路径与 `dsh-app://app/*` 按与 `fetch`/XHR **同一套规则**重写到回环 origin；基址未就绪时排队、就绪后建连；不做流处理（重连语义仍归原生实现） |
+| 目录选择 | `bridge::desktop_directory_pick` + preload 的 `__DSH_DIRECTORY_PICKER__` | ✅ 返回结构与官方一致（`string | null`）；补齐「先 restore + show + focus 再弹」与同窗口并发共用一次选择 |
+| 文件拖放 | preload `fileDrag`（stub）+ `__DSH_HOST_PATHS__` | 🟡 拖出是**永久差异**（Tauri/wry 没有「从 webview 拖出文件」的 API）；拖入走上传（官方在拖入**文件夹**时用真实路径生成 `@dir/` 引用，我们只能上传）→ §9 |
+| profile 独占 | `app_runtime`（`--project` 固定 desktop profile） | ✅ 代码层面已是事实；本轮只补日志口径 |
+
+**门禁（2026-10-25）**：`cargo test --workspace` 全绿（bin 195 + lib 171 + app_server 30，另 2 个真机 e2e 默认 ignored）；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 干净；JS 侧 `rewrite.test.cjs` / `shim.test.cjs` / `media-shim.test.cjs` 全过。
+
+**尚未完成**：guest 键盘转发、`did-fail-load` 上报、子资源级请求拦截、真实 history 恢复、macOS 14 以下分区隔离、崩溃报告里的渲染层 console 尾部、设备中断通知（拔麦克风）、Windows/Linux 真机复验。
 
 ## 8. 决策（全部对齐官方，不抄近路）
 
@@ -247,16 +271,37 @@ P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallb
 
 ## 9. 已知差异（接受并记录）
 
-- **渲染层 origin 拆分**：官方用一个流式 `protocol.handle('dsh-app')` 同时出文档与代理；我们在 WKWebView 上拆成「scheme 出文档/模块脚本 + 回环 app server 跑动态流量」（ADR-006）。行为一致，机制不同；shim 覆盖面（`fetch` / `XMLHttpRequest`）之外的请求（`EventSource`、worker 内 fetch、`sendBeacon`）需要时再补。
+- **渲染层 origin 拆分**：官方用一个流式 `protocol.handle('dsh-app')` 同时出文档与代理；我们在 WKWebView 上拆成「scheme 出文档/模块脚本 + 回环 app server 跑动态流量」（ADR-006）。行为一致，机制不同。重写覆盖面现在是 `fetch` / `XMLHttpRequest` / `EventSource`（后两者共用同一套 URL 规则）；**worker 内 fetch 与 `sendBeacon` 仍不重写**，需要时再补。
 - **scheme 响应被缓冲**：`dsh-app://` 只承载静态与模块脚本，Host GET 缓冲上限 32 MiB；大文件/流式必须走回环 origin。
 - **`fetch(new Request(...))` 带 body 会进内存**：WKWebView 不支持 ReadableStream 上传，桥会 `clone()` + `arrayBuffer()` 重建请求；大文件上传走 XHR（真流式）。
-- **EventSource 不重写**：只有 hmr / documentpreview 使用，且需要绝对回环 URL；未在 P1 验收范围内。
-- **麦克风需原生采集**：WKWebView 不实现 Media Capture（`navigator.mediaDevices === undefined`），P3 要用 AVCaptureSession 采集后喂页面。
-- **`__DSH_HOST_PATHS__` 恒空**：Tauri 无 `webUtils.getPathForFile` 等价物，拖入/粘贴文件按上传处理。
+- **EventSource 由 `bridge/media-shim.js` 重写**（P1 时曾判定「不重写」）：前端开发期确实会 `new EventSource('/api/…')`，相对路径打到 scheme 上会被整体缓冲。现在按 ADR-006 的「动态流量走回环 origin」重写 URL，但不接管数据流——重连语义仍归原生实现。
+- **麦克风由壳采集**：WKWebView 不实现 Media Capture（`navigator.mediaDevices === undefined`，macOS 27 上复验仍成立），所以由 `AVCaptureSession` 采集、`Channel` 推 PCM、页面合成 `MediaStream` 冒充 `getUserMedia`（ADR-008）。由此带来三处机制差异：
+  - **设备分组用 `uniqueID` 充当 `groupId`**：`AVCaptureDevice.groupID` 在 `objc2-av-foundation 0.3.2` 里没有导出；页面用 group 把当前设备与 `enumerateDevices()` 的条目对齐，两侧同源所以设备选择行为不变，但这个值不是真正的 hardware group id；
+  - **`track.stop()` 由 shim 劫持**：原生轨的 `ended` 事件不会被派发，shim 在 stop 时补发并顺带停掉原生采集（前端只靠这一个入口停录制）；
+  - **音频不做 AEC/NS/AGC 处理**：`echoCancellation` / `noiseSuppression` / `autoGainControl` 只作为首帧头里的请求字段透传，实际 DSP 由系统采集链决定，我们不加处理。
+- **触摸不到 TCC 的最后一公里**：`NSMicrophoneUsageDescription` 已写进 `src-tauri/Info.plist`，但**没有加 hardened runtime 的 `com.apple.security.device.audio-input` entitlement**（本地签名 `scripts/sign-local.sh` 不开 runtime，加了反而可能破坏本地构建）；公证发布前必须补。
+- **`__DSH_HOST_PATHS__` 恒空**：Tauri 无 `webUtils.getPathForFile` 等价物，拖入/粘贴文件按上传处理。**用户可见后果**：拖入「文件夹」时官方会用真实路径生成 `@dir/` 引用，我们 `pathFor` 返回空串，前端走 `attachment.pathUnavailable` 提示——要引用整个目录请用目录选择器。
+- **从应用拖出文件不可能**：官方 `fileDrag.prepare/start/release` 基于 `webContents.startDrag`，Tauri/wry 没有等价 API（`onDragDropEvent` 只处理「拖进来」），raw WKWebView 的 `startDrag` 是私有接口。这是**永久差异**，不是待办；当前 `fileDrag` 保持 stub（`prepare → undefined`、`start → false`），且本机 dsh 0.2.1-rc.2 里没有任何包消费它，产品影响为零。
 - **运行时**：官方内置 Python/Node/dsh/pnpm；我们复用机器全局 `dsh`（有意差异，避免包体与重复建设），因此「干净机器无 dsh」时需先安装（项目既有前置条件）。
 - WS 认证在 Tauri 上用 Rust 代理实现（Electron 是 `onBeforeSendHeaders`），行为一致、机制不同。
 - 非 macOS 平台的标题栏/外观按官方 Windows 方案对齐，但 Tauri 与 Electron 的控件细节会有差异；Windows 上自定义 scheme 的 origin 是 `http://dsh-app.localhost`，CORS 白名单与 `data-platform` 待复验。
 - 更新通道/签名流程按我们自己的发布体系，不复刻官方 updater。
+
+- **内嵌浏览器：持久分区而非内存分区**：官方 `dsh-sidebar-browser-<uuid>` 是进程内内存分区（退出即丢），我们按 §6.4 的目标做**持久**分区（macOS ≥14 `data_store_identifier`、Win/Linux 逐 webview 的 `data_directory`）。副作用是「浏览器标签里的登录态会跨重启保留」，这是有意选择。
+- **macOS 14 以下没有 guest 隔离**：wry 在 macOS < 14 上对自定义 data store 静默回落默认 store，此时多个 guest 共享同一存储。目标机 macOS 26 已覆盖，低版本按「无隔离」处理。
+- **guest 键盘转发不实现**：官方 `browser-guests.bind(window, attachInput)` 会把 guest 里的按键转发成 shortcuts-input（`kind:'webview'`）。Tauri 没有 `before-input-event`，唯一等价路径是向第三方页面注入抓 keydown 的脚本——违背「不向 guest 注入 JS」的边界，故不做。
+- **没有 `did-fail-load`**：wry 无加载失败回调。只有「建 guest 失败」会派发 `did-fail-load`（code `-2`）；页内导航失败表现为 loading 结束但 URL 未变，错误页由 WKWebView 自己画。
+- **`canGoBack` / `goBack` 是线性历史近似**：wry 无原生 history API，`goBack` 是「重新导航到上一条记录的 URL」，不恢复表单/滚动位置；`clearHistory` 语义与 Electron 一致。
+- **子资源级请求拦截缺失**：官方用 `session.webRequest.onBeforeRequest` 拦非 `http(s)/ws(s)` 与带凭据的请求；Tauri 无等价物。我们只覆盖「主 frame 导航」与「新窗口」两层。
+- **`params.httpreferrer` 与 `guest.on('login')`（取消 HTTP 认证框）无等价物**。
+- **关闭窗口的默认行为与官方不同**：官方 close **永远 preventDefault + hide**，退出只能走菜单/托盘/⌘Q；我们保留 `项目要求.md` FR-5（macOS 默认隐藏、Win/Linux 默认退出）+ 官方的一次性后台提示，并让「有活动任务时关窗」走退出确认。这条差异是**有意保留的产品决定**，如需完全对齐官方，把 `[window] closeAction` 改成 `hide` 即可。
+- **崩溃报告缺渲染层 console 尾部**：官方 `crash-report.ts` 会把渲染层最近的 error 级 console 输出（64 KiB 环形缓冲）写进报告；我们目前只把这些输出写进滚动日志（`page error:` 行）。补齐需要在 `bridge.rs` 里加 `RendererConsoleTail` 并把快照传进 `lifecycle::report_fatal`。
+- **macOS 材质/红绿灯：机制不同、效果对齐**。官方走 Electron 的 `vibrancy: 'sidebar'` + `trafficLightPosition {x:16,y:18}`；Tauri 的公开 API 只在 `WebviewWindowBuilder` 上暴露 `traffic_light_position`，而我们的窗口是「裸窗口 + 子 webview」，所以改用 `window-vibrancy`（`NSVisualEffectMaterial::Sidebar` + `State::Active`）+ AppKit 直接平移红绿灯（`platform/macos.rs::apply_window_chrome`）。两点实现约束值得记住：`standardWindowButton(...).frame()` 在 flipped 的标题栏容器里，必须用父视图的 `convertRect:toView:/fromView:` 两端换算（第一版按左下原点直接算，把按钮推出了窗口——真机截图才发现）；移动前要同时校验「窗口内」与「父视图内」，任一失败就不动。
+- **设备中断/拔出没有通知通道**：`AVCaptureSessionRuntimeError/WasInterrupted` 未接入，拔掉麦克风时表现为「电平归零、继续录静音」，插件的「录音中断」提示不会出现；`ended` 只在页面主动 `stop()` 时补发。修法需要 `objc2-foundation` 的通知观察（约 40 行）并配真机插拔验收，本轮未做（见 [spikes/media-input.md](spikes/media-input.md) §6）。
+- **`dsh://` 的归属冲突与 argv 通道**：官方 Electron app 在运行时也调用 `setAsDefaultProtocolClient('dsh')`，所以两个 app 都装在同一台机器上时，LaunchServices 只把 `dsh://` 交给其中一个（实测交给的是官方 app）。本壳的 `RunEvent::Opened` 路径用 `open -a "DSH Desktop" "dsh://open"` 验证通过；另外 **`dsh://…` 现在也接受走命令行**（`cli::parse` 把它当 run mode 收集，冷启动与第二实例都处理）——Windows/Linux 只有这条路，macOS 上两者都有。若要让本壳接管 scheme，需要在系统里把 `dsh` 默认处理器指到它。
+- **升级由壳执行，不再只给命令**：官方 Electron 壳只展示升级命令；本壳的「检查 dsh 更新」现在是「确认升级 / 取消」两个按钮，确认后在后台跑 `npm install -g @deepseek-ai/dsh@<通道>`（通道来自 dist-tags：预发布装跟随 `next`，正式版跟随 `latest`），成功后 `restart_stack` 重定位 dsh、重跑版本闸门并把渲染层经 loading 页重新加载；失败则回显 npm 输出尾部并给出可手动执行的命令。同时只允许一次升级（`UPGRADE_RUNNING`）。**侧栏「新版本」徽标也接上了**：三层栈 ready 后自动跑一次 `bridge::run_update_probe` 并 `publish_updates`（`phase: available`），所以 `dsh-client-ui-settings-general` 的 `DesktopUpdateSource` 一构造就能从 `status()`/`subscribe()` 拿到状态；点徽标走 `desktop_updates_open`，探测到新版后直接进入同一套确认/升级/重启流程。
+- **滚动手感靠原生标志补齐**：官方 Electron 的 `BrowserWindow` 在 macOS 上默认 `scrollBounce: false`，整页不会橡皮筋回弹；Tauri 的 WKWebView 默认允许整页回弹与双指左右「返回」手势，所以同样的页面在壳里会像网页一样被拖走。现在由 `platform::apply_window_chrome` 遍历视图树，把 `WKWebView` 的 `scrollView.bounces` / `alwaysBounceVertical|Horizontal` 置否、并关闭 `allowsBackForwardNavigationGestures`，另在 preload 注入 `html,body{overscroll-behavior:none}` 兜底。日志会写 `scrolling: bounce and swipe-back off on N webview(s)`，`no webview found` 表示 AppKit 的视图层级变了、需要重新定位。
+- **Windows / Linux 未真机复验**：深链注册表、`.desktop`、托盘新菜单、`RunEvent::ExitRequested` 拦截、自定义 scheme 的 origin（`http://dsh-app.localhost`）都只做过类型检查。
 
 ## 10. 参考（官方源码）
 
@@ -270,7 +315,7 @@ P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallb
 - `dsh-desktop-host`（私有包，随官方 app.asar 分发，不在 npm）
 - `@deepseek-ai/dsh/profile-boot`（`runProfile`，全局 dsh 可解析）
 
-### 10.1 本仓库实现（P1/P2）
+### 10.1 本仓库实现
 
 | 官方文件 / 能力 | 本仓库 |
 |---|---|
@@ -281,4 +326,11 @@ P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallb
 | `src/ipc.ts` | `bridge.rs` 的命令与事件常量；契约见 [bridge-contract.md](bridge-contract.md) |
 | `dsh-desktop-host` | `app_runtime.rs`（编排）+ `desktop-host.mjs` |
 | `runProfile` / 前端 dist | `dsh-lite-core/src/frontend_dist.rs`、`version_gate.rs` |
-| 真机证据 | [spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md) |
+| `src/browser-guests.ts` / `preload-browser.ts`（Sidebar Browser） | `src-tauri/src/browser/{lease,partition,policy,history,guest,commands}.rs`、`src-tauri/bridge/webview-shim.js` |
+| `packages/client/ui-sidebar-browser` 的 `<webview>` 用法 | `bridge/webview-shim.js` 的自定义元素（同 API 形状） |
+| `src/main.ts` 的 `open-url` / `single-instance` / tray | `platform/deeplink.rs`、`platform/{macos,windows,unix}.rs`、`lifecycle::handle_deep_link` / `handle_second_instance`、`tray.rs`、`src-tauri/Info.plist` |
+| `src/quit-confirmation.ts` + `host-process.ts::inspectQuit` | `lifecycle::{quit,resolve_quit_prompt}`、`dsh_lite_core::desktop_host::inspect_quit`（`DSH_HOST_CONTROL` 行协议）、`host/desktop-host.mjs::inspectQuit` |
+| `src/crash-report.ts` / `src/fatal-recovery.ts` | `lifecycle::{report_fatal,install_panic_hook,recovery_detail,error_chain}` + `dsh_lite_core::logging::write_crash_report` |
+| `src/background-notice.ts`（首次隐藏提示） | `lifecycle::{close_decision,hide_to_background}` |
+| 语音输入所需的 `getUserMedia`（Electron 直接给 Chromium） | `src-tauri/src/media/{permission,pcm,session,macos}.rs` + `bridge/media-shim.js`（合成 MediaStream，ADR-008） |
+| 真机证据 | [spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md)、[spikes/media-input.md](spikes/media-input.md) |

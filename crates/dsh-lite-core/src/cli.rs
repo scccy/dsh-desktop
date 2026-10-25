@@ -35,6 +35,12 @@ pub struct RunOptions {
     pub verbose: bool,
     /// Forget the remembered window size and position.
     pub reset_window: bool,
+    /// `dsh://…` arguments, in the order they appeared.
+    ///
+    /// macOS delivers deep links as `RunEvent::Opened`, but Windows and Linux
+    /// (and a second instance everywhere) deliver them on the command line — so
+    /// a `dsh://` argument must parse as a run mode, not as an unknown flag.
+    pub deep_links: Vec<String>,
 }
 
 /// Argument parsing failures.
@@ -126,6 +132,10 @@ where
                 })?;
                 options.port = Some(port);
             }
+            // A deep link is a run mode, not a flag: the lifecycle handles it
+            // once the window exists (and the single-instance plugin forwards
+            // it to the instance that already owns the window).
+            other if other.starts_with("dsh://") => options.deep_links.push(other.to_owned()),
             other => return Err(CliError::UnknownArgument(other.to_owned())),
         }
     }
@@ -154,6 +164,17 @@ mod tests {
     #[test]
     fn no_arguments_means_a_default_run() {
         assert_eq!(run(&[]), RunOptions::default());
+    }
+
+    #[test]
+    fn a_deep_link_argument_is_a_run_mode_not_an_unknown_flag() {
+        let options = run(&["dsh://open"]);
+        assert_eq!(options.deep_links, vec!["dsh://open".to_owned()]);
+        // Anything that merely looks similar is still refused.
+        assert!(
+            parse(["ds://open"]).is_err() || matches!(parse(["ds://open"]), Ok(CliAction::Help))
+        );
+        assert!(parse(["dsh-open"]).is_err());
     }
 
     #[test]

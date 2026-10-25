@@ -71,7 +71,22 @@
 
       <h2>dsh</h2>
       <div class="field">
-        <label for="profile">profile</label>
+        <label>运行模式 (mode)</label>
+        <p class="hint" data-role="run-mode"></p>
+      </div>
+      <div class="field">
+        <label for="web-fallback">
+          <input id="web-fallback" type="checkbox" />
+          使用旧的两层回退（webFallback = dsh --profile web）
+        </label>
+        <p class="hint">
+          关闭时走三层桌面栈：Desktop Host + <code>dsh-app://</code> + preload 桥。
+          打开后本壳会像旧版一样直接跑 <code>dsh --profile &lt;下面那个名字&gt;</code>，
+          桌面栈的能力（preload 桥、内嵌浏览器、麦克风等）都不再生效。
+        </p>
+      </div>
+      <div class="field">
+        <label for="profile">回退时的 dsh profile</label>
         <input
           id="profile"
           type="text"
@@ -136,6 +151,7 @@
 
         var fields = {
           profile: document.getElementById("profile"),
+          webFallback: document.getElementById("web-fallback"),
           connectMode: document.getElementById("connect-mode"),
           url: document.getElementById("url"),
           port: document.getElementById("port"),
@@ -145,6 +161,16 @@
         };
 
         var urlConfigured = false;
+
+        // The profile name only exists for the fallback path; in desktop mode it
+        // is not read at all, so it must not look editable.
+        function syncFallbackField() {
+          var on = fields.webFallback.checked;
+          fields.profile.disabled = !on;
+          fields.profile.title = on
+            ? ""
+            : "desktop 模式不使用 profile（桌面 profile 由桌面端独占）";
+        }
 
         function load() {
           return invoke("shell_info")
@@ -166,6 +192,14 @@
                   : "config.toml 里还没有保存附着 URL。";
 
               fields.profile.value = info.profile || "";
+              fields.webFallback.checked = info.webFallback === true;
+              text(
+                "run-mode",
+                info.webFallback === true
+                  ? "web 回退（两层：dsh --profile " + (info.profile || "web") + "）"
+                  : "desktop（三层桌面栈）"
+              );
+              syncFallbackField();
               fields.connectMode.value = info.connectMode || "spawn";
               // The form edits the configured port, never the port this run
               // happened to get from the operating system.
@@ -187,6 +221,7 @@
           var typedUrl = fields.url.value.trim();
           var payload = {
             profile: fields.profile.value,
+            webFallback: fields.webFallback.checked,
             connectMode: fields.connectMode.value,
             // A stored URL may carry a token, so it is only replaced when the
             // user typed a new one.
@@ -210,6 +245,8 @@
             }
           );
         }
+
+        fields.webFallback.addEventListener("change", syncFallbackField);
 
         document
           .querySelector('[data-action="save"]')

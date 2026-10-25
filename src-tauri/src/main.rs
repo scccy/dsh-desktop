@@ -10,8 +10,10 @@
 
 mod app_runtime;
 mod bridge;
+mod browser;
 mod connection;
 mod lifecycle;
+mod media;
 mod platform;
 mod scheme;
 mod shell_server;
@@ -27,7 +29,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{ContextMenu, MenuBuilder, MenuItemBuilder};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use url::Url;
 
 use dsh_lite_core::cli::{CliAction, RunOptions};
@@ -35,7 +37,6 @@ use dsh_lite_core::config::{CloseAction, Config, ConnectMode, LogLevel};
 use dsh_lite_core::logging::Logger;
 
 use crate::connection::ErrorKind;
-use crate::lifecycle::effective_close_action;
 use crate::state::{AppState, Status, WINDOW_STATE_FILE};
 use crate::window::{CONTENT_WEBVIEW, HEADER_WEBVIEW, MAIN_WINDOW, MonitorRect};
 
@@ -136,6 +137,9 @@ fn run(options: RunOptions) {
         ))
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&state))
+        // Registered before the bridge state takes ownership of `data_dir`:
+        // the guest partitions live under `<data_dir>/browser`.
+        .manage(browser::BrowserState::new(data_dir.clone()))
         .manage(bridge::BridgeState::new(data_dir))
         .on_menu_event(|app, event| run_menu_entry(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
@@ -160,6 +164,9 @@ fn run(options: RunOptions) {
             bridge::desktop_boot_failed,
             bridge::desktop_device_info,
             bridge::desktop_directory_pick,
+            bridge::desktop_microphone_status,
+            bridge::desktop_microphone_start,
+            bridge::desktop_microphone_stop,
             bridge::desktop_shortcuts_get,
             bridge::desktop_shortcuts_edit,
             bridge::desktop_shortcuts_recording,
@@ -177,7 +184,13 @@ fn run(options: RunOptions) {
             bridge::desktop_platform_bounds,
             bridge::desktop_platform_close,
             bridge::desktop_browser_acquire,
-            bridge::desktop_browser_release
+            bridge::desktop_browser_release,
+            browser::commands::desktop_browser_guest_attach,
+            browser::commands::desktop_browser_guest_bounds,
+            browser::commands::desktop_browser_guest_navigate,
+            browser::commands::desktop_browser_guest_command,
+            browser::commands::desktop_browser_guest_state,
+            browser::commands::desktop_browser_guest_close
         ]);
 
     // The `dsh-app://` documents must be registered before the builder becomes
@@ -218,6 +231,12 @@ fn run(options: RunOptions) {
             }
 
             let window = build_window(&handle, &state, &shell_origin)?;
+            // A cold start can carry a deep link on the command line (Windows,
+            // Linux, or `dsh-desktop dsh://open` on macOS); macOS itself prefers
+            // `RunEvent::Opened`, which `platform` handles.
+            for link in state.cli.deep_links.clone() {
+                lifecycle::handle_deep_link(&handle, &link);
+            }
             install_shell_chrome(&handle, &state, &window)?;
             attach_window_events(&handle, &window);
             lifecycle::remember_layout(&handle, &window);
@@ -259,20 +278,24 @@ fn start_connection(handle: AppHandle, state: Arc<AppState>) {
         let mut runtime = state.runtime();
         runtime.status = Status::Connecting;
     }
-    thread::Builder::new()
-        .name("desktop-runtime".into())
-        .spawn(
-            move || match app_runtime::start(handle.clone(), Arc::clone(&state)) {
-                Ok(started) => state.logger.info(&format!(
+    let boot = handle.clone();
+    lifecycle::guarded_startup(handle, move || {
+        match app_runtime::start(boot.clone(), Arc::clone(&state)) {
+            Ok(started) => {
+                state.logger.info(&format!(
                     "three-layer desktop stack ready: app {} / host {} ({} injections)",
                     started.app_origin,
                     started.host_origin,
                     started.injections.len()
-                )),
-                Err(error) => connection::fail(&handle, &state, error),
-            },
-        )
-        .ok();
+                ));
+                // Let the Web UI's sidebar badge learn about a newer release
+                // without the user having to open the menu.
+                let probe = boot.clone();
+                thread::spawn(move || bridge::run_update_probe(&probe));
+            }
+            Err(error) => connection::fail(&boot, &state, error),
+        }
+    });
 }
 
 /// Tears the current stack down and starts it again (reconnect, profile switch).
@@ -421,47 +444,73 @@ fn build_window(
 
     let navigation_state = Arc::clone(state);
     let load_handle = app.clone();
+    let guest_handle = app.clone();
     let log_state = Arc::clone(state);
     // The window starts on a shell-owned document served through the
     // `dsh-app://` scheme handler, so it never needs the Host to be up.
     let loading_url =
         Url::parse("dsh-app://shell/loading.html").expect("the shell loading page URL is valid");
-    let content_builder =
-        tauri::webview::WebviewBuilder::new(CONTENT_WEBVIEW, WebviewUrl::External(loading_url))
-            .initialization_script(bridge::bridge_script(Some(bridge::APP_SCHEME_ORIGIN)))
-            .on_navigation(move |url| handle_navigation(&navigation_state, url))
-            .on_page_load(move |_webview, payload| {
-                log_state.logger.debug(&format!(
-                    "content page load: {:?} {}",
-                    payload.event(),
-                    dsh_lite_core::url_policy::redact_url(payload.url().as_str())
-                ));
-                if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                    // The shortcut listener lives inside the page, so every
-                    // navigation drops it: re-install on each finished load
-                    // instead of once at startup.
-                    if let Some(state) = load_handle.try_state::<Arc<AppState>>() {
-                        let allowed = cfg!(debug_assertions) || state.config().window.devtools;
-                        if allowed
-                            && let Some(content) = load_handle.get_webview(CONTENT_WEBVIEW)
-                            && let Err(error) = shortcuts::install(&content)
-                        {
-                            state.logger.warn(&format!(
-                                "could not install the keyboard shortcuts: {error}"
-                            ));
-                        }
-                    }
-                    // The token handshake only exists on the legacy attach /
-                    // web-profile path; the desktop stack authenticates in
-                    // `app_runtime` before the document is shown.
-                    if payload.url().scheme() == "dsh-app" {
-                        bridge::notify_workspace_entered(&load_handle);
-                    } else if matches!(payload.url().scheme(), "http" | "https") {
-                        connection::handle_page_load(&load_handle, payload.url());
+    let browser_guests = config.dsh.browser_guests;
+    // `caps` must run before the preload bridge (it reads the flags while it
+    // initialises), and the `<webview>` shim must run after it (it needs the
+    // bridge's invoke). Both are no-ops while `browserGuests` is off.
+    let content_builder = browser::with_shim(
+        browser::with_caps(
+            tauri::webview::WebviewBuilder::new(CONTENT_WEBVIEW, WebviewUrl::External(loading_url)),
+            browser_guests,
+        )
+        .initialization_script(bridge::bridge_script(Some(bridge::APP_SCHEME_ORIGIN)))
+        .on_navigation(move |url| {
+            let allowed = handle_navigation(&navigation_state, url);
+            if allowed {
+                // The page that owned the guests is going away; the official
+                // shell does the same on `did-start-navigation`.
+                let closed = browser::shutdown(&guest_handle);
+                if closed > 0 {
+                    log_guests(&guest_handle, closed);
+                }
+            }
+            allowed
+        })
+        .on_page_load(move |_webview, payload| {
+            log_state.logger.debug(&format!(
+                "content page load: {:?} {}",
+                payload.event(),
+                dsh_lite_core::url_policy::redact_url(payload.url().as_str())
+            ));
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                // The child webviews exist by now (they do not at chrome time),
+                // so this is where the scroll behaviour actually lands.
+                if let Some(window) = load_handle.get_window(MAIN_WINDOW) {
+                    platform::tame_scrolling(&window);
+                }
+                // The shortcut listener lives inside the page, so every
+                // navigation drops it: re-install on each finished load
+                // instead of once at startup.
+                if let Some(state) = load_handle.try_state::<Arc<AppState>>() {
+                    let allowed = cfg!(debug_assertions) || state.config().window.devtools;
+                    if allowed
+                        && let Some(content) = load_handle.get_webview(CONTENT_WEBVIEW)
+                        && let Err(error) = shortcuts::install(&content)
+                    {
+                        state.logger.warn(&format!(
+                            "could not install the keyboard shortcuts: {error}"
+                        ));
                     }
                 }
-            })
-            .initialization_script(CONTEXT_MENU_SCRIPT);
+                // The token handshake only exists on the legacy attach /
+                // web-profile path; the desktop stack authenticates in
+                // `app_runtime` before the document is shown.
+                if payload.url().scheme() == "dsh-app" {
+                    bridge::notify_workspace_entered(&load_handle);
+                } else if matches!(payload.url().scheme(), "http" | "https") {
+                    connection::handle_page_load(&load_handle, payload.url());
+                }
+            }
+        })
+        .initialization_script(CONTEXT_MENU_SCRIPT),
+        browser_guests,
+    );
 
     window.add_child(
         content_builder,
@@ -472,6 +521,15 @@ fn build_window(
     restore_geometry(&window, state, &config);
     layout_webviews(&window);
     Ok(window)
+}
+
+/// Records how many embedded browser guests were released with the old document.
+fn log_guests(app: &AppHandle, closed: usize) {
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.logger.debug(&format!(
+            "released {closed} embedded browser guest(s) with the previous document"
+        ));
+    }
 }
 
 /// Places the header and content webviews inside the window's client area.
@@ -602,23 +660,19 @@ fn attach_window_events(app: &AppHandle, window: &tauri::Window) {
         window.is_fullscreen().unwrap_or(false),
     ));
     window.on_window_event(move |event| {
-        let Some(state) = handle.try_state::<Arc<AppState>>() else {
-            return;
-        };
+        // Every branch below works off the app handle alone; the state lookup
+        // that used to guard the close decision now happens inside `lifecycle`.
         match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                let configured = state.config().window.close_action;
-                match effective_close_action(state.platform(), configured, state.created_config) {
-                    CloseAction::Hide => {
-                        let _ = window_clone.hide();
-                        lifecycle::note_background(&state);
-                    }
-                    CloseAction::Quit => lifecycle::quit(&handle),
-                }
+                // Hide or quit is decided inside `lifecycle` (FR-5 default plus
+                // the official one-time background notice); the window is never
+                // destroyed here, so the Host keeps running.
+                lifecycle::hide_to_background(&handle);
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 layout_webviews(&window_clone);
+                platform::tame_scrolling(&window_clone);
                 lifecycle::remember_layout(&handle, &window_clone);
                 // macOS keeps the traffic lights over the page; the Web UI
                 // drops their clearance while fullscreen.
@@ -638,15 +692,18 @@ fn attach_window_events(app: &AppHandle, window: &tauri::Window) {
 
 /// Shows and focuses the existing window when a second instance starts.
 fn on_second_instance(app: &AppHandle, arguments: &[String]) {
+    // A `dsh://open` argument is consumed by `lifecycle`, which logs and
+    // focuses the primary window; anything else keeps the attach/port handling
+    // below.
+    if lifecycle::handle_second_instance(app, arguments) {
+        return;
+    }
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;
     };
     let state = Arc::clone(state.inner());
-    state.logger.info(&format!(
-        "a second instance asked for the window with {} arguments",
-        arguments.len()
-    ));
-    lifecycle::show_main_window(app);
+    // `lifecycle::handle_second_instance` already logged the request and
+    // focused the window when it was not a deep link.
 
     let Ok(CliAction::Run(options)) = dsh_lite_core::cli::parse(arguments.iter().skip(1).cloned())
     else {
@@ -673,7 +730,12 @@ struct ShellInfo {
     dsh_path: Option<String>,
     dsh_version: Option<String>,
     node_version: Option<String>,
+    /// Effective profile name: `desktop` unless the legacy fallback is on.
     profile: String,
+    /// Whether the shell runs the legacy two-layer `dsh --profile <name>` path.
+    ///
+    /// This — not `profile` — is the switch that decides desktop vs web mode.
+    web_fallback: bool,
     connect_mode: &'static str,
     url_set: bool,
     close_action: &'static str,
@@ -696,6 +758,9 @@ struct ShellInfo {
 #[serde(rename_all = "camelCase")]
 struct SettingsPayload {
     profile: String,
+    /// The mode switch. `profile` alone must never flip it: an old config file
+    /// can still carry `profile = "web"` while the shell runs the desktop stack.
+    web_fallback: bool,
     connect_mode: String,
     /// Attach URL; `None` keeps the stored value, which the page never shows
     /// because it may carry a token.
@@ -720,7 +785,12 @@ fn shell_info(state: State<'_, Arc<AppState>>) -> ShellInfo {
         dsh_path: runtime.dsh.command.clone(),
         dsh_version: runtime.dsh.version.clone(),
         node_version: runtime.dsh.node_version.clone(),
-        profile: config.dsh.profile.clone(),
+        profile: if config.dsh.web_fallback {
+            config.dsh.profile.clone()
+        } else {
+            dsh_lite_core::desktop_host::PROFILE_NAME.to_owned()
+        },
+        web_fallback: config.dsh.web_fallback,
         connect_mode: connect_mode_str(config.connect.mode),
         url_set: !config.connect.url.trim().is_empty(),
         close_action: close_action_str(config.window.close_action),
@@ -750,8 +820,19 @@ fn shell_info(state: State<'_, Arc<AppState>>) -> ShellInfo {
 fn save_settings(state: State<'_, Arc<AppState>>, settings: SettingsPayload) -> Result<(), String> {
     let state = state.inner();
     let mut config = state.config();
-    config.dsh.profile = settings.profile.trim().to_owned();
-    config.dsh.web_fallback = config.dsh.profile.trim() == "web";
+    config.dsh.web_fallback = settings.web_fallback;
+    // `profile` only matters on the fallback path; keep the desktop profile name
+    // in the file when the three-layer stack is in use, so the config does not
+    // keep claiming `web` after the mode was turned off.
+    let requested = settings.profile.trim();
+    config.dsh.profile = if settings.web_fallback {
+        if requested.is_empty() {
+            return Err("webFallback 打开时必须填写 profile".to_owned());
+        }
+        requested.to_owned()
+    } else {
+        dsh_lite_core::desktop_host::PROFILE_NAME.to_owned()
+    };
     config.connect.mode = parse_connect_mode(&settings.connect_mode)?;
     if let Some(url) = &settings.url {
         config.connect.url = url.trim().to_owned();
@@ -849,6 +930,14 @@ const MENU_ABOUT: &str = "shell:about";
 
 /// Deadline for the `npm view` probe behind an update check.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Deadline for `npm install -g`. A global install has to fetch and relink, so it
+/// gets minutes rather than seconds; the user can keep using the app meanwhile.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// One upgrade at a time: a second confirmation while one is running is refused
+/// instead of racing two `npm install` runs against the same prefix.
+static UPGRADE_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Builds one popup menu entry, optionally showing its shortcut on the right.
 ///
@@ -972,26 +1061,49 @@ fn check_update(app: &AppHandle) {
         let args = vec![
             "view".to_owned(),
             dsh_lite_core::update::PACKAGE.to_owned(),
-            "version".to_owned(),
+            "dist-tags".to_owned(),
+            "--json".to_owned(),
         ];
         state.logger.info(&format!(
-            "checking {} with npm view",
+            "checking {} dist-tags with npm view",
             dsh_lite_core::update::PACKAGE
         ));
 
         let message = match connection::run_capture(&npm, &args, UPDATE_TIMEOUT) {
-            Ok(capture) => match dsh_lite_core::update::interpret(
+            Ok(capture) => match dsh_lite_core::update::interpret_dist_tags(
                 &capture.output,
                 capture.code,
                 installed.as_deref(),
             ) {
-                Ok(outcome) if outcome.newer => format!(
-                    "有新版本：{}\n当前安装：{}\n\n升级命令（只展示，不会自动执行）：\n{}",
-                    outcome.latest,
-                    outcome.installed.as_deref().unwrap_or("未知"),
-                    dsh_lite_core::update::UPGRADE_COMMAND
+                Ok(outcome) if outcome.newer => {
+                    let channel = outcome.channel.as_deref().unwrap_or("latest").to_owned();
+                    let approved = handle
+                        .dialog()
+                        .message(format!(
+                            "有新版本：{}（通道 {channel}）\n当前安装：{}\n\n现在升级吗？\n升级会在后台执行 `npm install -g {}@{}`，完成后自动重新加载页面。",
+                            outcome.latest,
+                            outcome.installed.as_deref().unwrap_or("未知"),
+                            dsh_lite_core::update::PACKAGE,
+                            channel
+                        ))
+                        .title("检查 dsh 更新")
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "确认升级".to_owned(),
+                            "取消".to_owned(),
+                        ))
+                        .blocking_show();
+                    if approved {
+                        upgrade_and_restart(&handle, &state, &channel);
+                    }
+                    return;
+                }
+                Ok(outcome) => format!(
+                    "已是最新版本：{}",
+                    outcome
+                        .installed
+                        .as_deref()
+                        .unwrap_or(outcome.latest.as_str())
                 ),
-                Ok(outcome) => format!("已是最新版本：{}", outcome.latest),
                 Err(error) => format!("无法判断版本：{error}"),
             },
             Err(error) => format!("检查失败：{error}"),
@@ -1003,6 +1115,103 @@ fn check_update(app: &AppHandle) {
             .title("检查 dsh 更新")
             .show(|_| {});
     });
+}
+
+/// Runs `npm install -g <package>@<channel>` and reloads the shell on success.
+///
+/// The upgrade happens in the background so the window stays usable; the stack is
+/// restarted afterwards (`restart_stack`), which re-locates `dsh`, re-runs the
+/// version gate and navigates the renderer back through the loading page — the
+/// "refresh" the user asked for.
+pub(crate) fn upgrade_and_restart(app: &AppHandle, state: &Arc<AppState>, channel: &str) {
+    use std::sync::atomic::Ordering;
+
+    if UPGRADE_RUNNING.swap(true, Ordering::SeqCst) {
+        app.dialog()
+            .message("已经有一次升级在进行中，请等它结束。")
+            .title("检查 dsh 更新")
+            .show(|_| {});
+        return;
+    }
+    let handle = app.clone();
+    let state = Arc::clone(state);
+    let channel = channel.to_owned();
+    thread::spawn(move || {
+        // Park the renderer on the loading page *before* npm rewrites the
+        // installed package: a live page keeps the plugin hot-reload watcher on,
+        // and the half-written bundles surface as `Unexpected EOF` script errors
+        // (and, in one report, a panic while the stack was being replaced).
+        if let Some(content) = handle.get_webview(CONTENT_WEBVIEW)
+            && let Ok(loading) = Url::parse("dsh-app://shell/loading.html")
+        {
+            let _ = content.navigate(loading);
+        }
+        thread::sleep(Duration::from_millis(500));
+
+        let (program, prefix) = platform::shell_program("npm");
+        let npm = dsh_lite_core::dsh_locate::DshCommand::new(program, prefix);
+        let target = format!("{}@{channel}", dsh_lite_core::update::PACKAGE);
+        let args = vec!["install".to_owned(), "-g".to_owned(), target.clone()];
+        state
+            .logger
+            .info(&format!("upgrading dsh: npm install -g {target}"));
+        let result = connection::run_capture(&npm, &args, UPGRADE_TIMEOUT);
+        UPGRADE_RUNNING.store(false, Ordering::SeqCst);
+
+        match result {
+            Ok(capture) if capture.code == 0 => {
+                state
+                    .logger
+                    .info("dsh upgraded; restarting the desktop stack");
+                handle
+                    .dialog()
+                    .message("升级完成，正在重新加载…")
+                    .title("检查 dsh 更新")
+                    .show(|_| {});
+                restart_stack(&handle, &state);
+            }
+            Ok(capture) => {
+                let tail = tail_lines(&capture.output, 12);
+                state.logger.error(&format!(
+                    "dsh upgrade failed (exit {}): {tail}",
+                    capture.code
+                ));
+                handle
+                    .dialog()
+                    .message(format!(
+                        "升级失败（npm 退出码 {}）。\n\n{tail}\n\n也可以在终端手动执行：\n{}",
+                        capture.code,
+                        dsh_lite_core::update::upgrade_command(&channel)
+                    ))
+                    .title("检查 dsh 更新")
+                    .show(|_| {});
+            }
+            Err(error) => {
+                state
+                    .logger
+                    .error(&format!("dsh upgrade could not run: {error}"));
+                handle
+                    .dialog()
+                    .message(format!(
+                        "升级失败：{error}\n\n可以在终端手动执行：\n{}",
+                        dsh_lite_core::update::upgrade_command(&channel)
+                    ))
+                    .title("检查 dsh 更新")
+                    .show(|_| {});
+            }
+        }
+    });
+}
+
+/// Last `count` non-empty lines of a command's output, for a dialog.
+fn tail_lines(output: &str, count: usize) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].join("\n")
 }
 
 /// Shows the product name and version.

@@ -9,21 +9,31 @@
 │ src-tauri/                                                               │
 │   main / app_runtime / scheme / bridge / connection(旧路径) /            │
 │   lifecycle / window / tray / menu / shortcuts / state                   │
+│   browser/         内嵌浏览器：lease / partition / policy / history /    │
+│                    guest / commands（每个 guest 一个子 webview）         │
+│   media/           麦克风：pcm / permission / session / macos(AVCapture) │
 │   platform/        唯一的平台差异层                                       │
+│   bridge/          脚本：preload.js / webview-shim.js / media-shim.js    │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ crates/dsh-lite-core/   纯 Rust，无 GUI 依赖                              │
 │   config / cli / dsh_locate / env_probe / desktop_host / version_gate /   │
 │   frontend_dist / app_server（静态 + 流式 HTTP + WS + CORS）/             │
 │   launcher / url_policy / logging / update / job                         │
 └──────────────────────────────────────────────────────────────────────────┘
-        │ 启动 / IPC                          ▲ initialization_script（桥）
+        │ 启动 / IPC                          ▲ initialization_script（注入脚本，见 §1.2）
         ▼                                     │
 ┌──────────────────────────┐      ┌──────────────────────────────────────┐
 │ Desktop Host 子进程       │      │ Renderer: dsh-app://app/              │
 │ Node · 全局 dsh           │◄────►│  官方前端 dist（全局安装内读取）        │
 │ runProfile(desktop)       │ HTTP │  window.dshDesktop / boot 桥          │
 │ 回报 url + injections     │  WS  │  data-platform=darwin                 │
-└──────────────────────────┘      └──────────────────────────────────────┘
+└──────────────────────────┘      └───────────────┬──────────────────────┘
+                                                  │ Window::add_child
+                                  ┌───────────────▼────────────────────┐
+                                  │ guest 子 webview (browser-guest-N) │
+                                  │ 独立持久分区 · 第三方 https 页面   │
+                                  │ 无 invoke 权限（ACL 按 origin 拒） │
+                                  └────────────────────────────────────┘
 ```
 
 默认启动是**三层**的：Rust 壳（窗口、`dsh-app` scheme、回环代理、preload 桥）→ Desktop Host 子进程（desktop profile）→ Renderer（`dsh-app://app/`，读全局安装里的 `dsh-web-frontend/dist`）。渲染层 origin 与动态流量的拆分见 [ADR-006](#adr-006-渲染层-origin-拆分)。`--url` / `--port` 或 `webFallback = true` 时退回旧的两层路径（壳直接加载一个已在运行的 `dsh web`）。
@@ -46,8 +56,26 @@
 | `url_policy` | token 提取与脱敏、同源判断、最终 URL 校验 | 网络请求 |
 | `logging` | 滚动日志、崩溃报告、脱敏写出 | 决定记什么 |
 | `update` / `job` | npm 版本探测 / 进程树回收 | UI |
+| `browser::lease` | workspace → 持久分区、lease → guest 的两级所有权（归属校验、幂等释放、整体回收） | 创建 webview、渲染页面 |
+| `browser::partition` | workspace key → 稳定的持久分区标识（macOS ≥ 14 data store / Win-Linux 独立 data 目录） | 读写分区内容 |
+| `browser::policy` | guest 主 frame 导航白名单、新窗口白名单、**受权 origin 拦截** | 子资源级请求拦截（无等价物） |
+| `browser::history` | 线性历史近似（`canGoBack`/`goBack` 是重新导航，不是原生历史恢复） | 原生 history list |
+| `browser::guest` | 建子 webview、几何同步、下载/权限/新窗口钩子、状态快照事件 | 桥命令鉴权、页面 DOM |
+| `browser::commands` | `desktop_browser_*` 八条命令、sender 校验、lease 归属校验 | 页面侧 `<webview>` 元素 |
+| `media::pcm` | 采样格式归一化（f32/i16、交错/非交错）、下混、流式重采样、定长分帧、f32le 编码 | 设备 I/O |
+| `media::permission` | TCC 授权状态、设备选择、启动决策、与页面一致的失败原因串 | 弹系统授权窗（在 `media::macos`） |
+| `media::session` | 采集会话状态机（idle/requesting/starting/live/stopping/failed）与副作用动作 | 任何 I/O |
+| `media::macos` | `AVCaptureSession` 采集、`CMSampleBuffer` → PCM、`Channel` 推帧、状态事件 | 格式换算（在 `pcm`） |
+| `media::unsupported` | 非 macOS 的同名占位（固定 `unsupported`） | 真实采集（WASAPI / PipeWire 后续） |
 
-**落地状态**：三层链路已在 macOS 真机端到端跑通（见 [desktop-parity §7.2](desktop-parity.md#72-p1--p2-进展2026-10-25-真机验收)）；`cargo test --workspace` 281 passed；clippy/fmt 干净；release 二进制 6.9 MB。Windows/Linux 尚未复验新架构。
+**落地状态**：三层链路已在 macOS 真机端到端跑通（见 [desktop-parity §7.2](desktop-parity.md#72-p1--p2-进展2026-10-25-真机验收)）；clippy/fmt 干净；release 二进制 6.9 MB。Windows/Linux 尚未复验新架构。
+
+P3/P4 新增的两块原生能力，落地程度不同，不要混为一谈：
+
+| 模块 | 状态 |
+|---|---|
+| `browser/**` + `bridge/webview-shim.js` | 代码与单测齐全，**默认关闭**（`[dsh] browserGuests = false`），**尚无真机验收**；见 [ADR-007](#adr-007-内嵌浏览器--tauri-子-webview--webview-兼容层) |
+| `media/**` + `bridge/media-shim.js` | 纯逻辑（`pcm` / `permission` / `session`）、macOS 采集（`macos.rs`）、三条 `desktop_microphone_*` 命令与 shim 注入均已接线；**尚无真机验收**（需麦克风与 TCC 授权）；见 [ADR-008](#adr-008-媒体采集--原生-avcapturesession--channel-推-pcm--页面合成-mediastream) |
 
 ### 1.1 平台差异层
 
@@ -67,6 +95,24 @@ src-tauri/src/platform/
 - **`crates/dsh-lite-core` 内不得出现平台 UI 分支**。`cfg(unix)` / `cfg(windows)` 在该 crate 里只用于进程、环境、路径等系统行为（可执行文件与扩展名搜索、登录 shell 探针、进程组 / Job Object、平台配置目录）；
 - 新增一个平台差异时，先问"它是否属于 UI 栈"：属于就写进 `src-tauri/src/platform/<平台>.rs`，不属于（可被单测覆盖的系统行为）就写进 `dsh-lite-core` 并补单测；
 - 这一层同时是 ADR-002 的退路：将来某个平台要换原生壳，只需替换该平台自己的文件，`dsh-lite-core` 原样复用。
+
+### 1.2 注入脚本与注入顺序
+
+content webview 在页面脚本之前，按下面这个顺序执行 `initialization_script`（顺序由 `main.rs::build_window` 的 builder 链决定，**不可交换**）：
+
+| # | 脚本 | 何时注入 | 职责 | 依赖 |
+|---|---|---|---|---|
+| 1 | `browser::CAPS_JS` | 恒注入（内容随开关变） | 只写 `globalThis.__DSH_BRIDGE_CAPS__ = { browserGuests, protocolVersion }` | 无 —— 必须是第一段，`preload.js` 初始化时就读它 |
+| 2 | `bridge/preload.js` | 恒注入 | `window.dshDesktop` / `dshDesktopBoot` / `data-platform` / `fetch` + `XMLHttpRequest` 重写 | `window.__TAURI_INTERNALS__.invoke` |
+| 3 | `bridge/media-shim.js` | 恒注入（与第 2 段同一个 `initialization_script`，`bridge::bridge_script()` 里拼在 preload 之后） | `EventSource` 重写 + `getUserMedia` 合成 | 第 2 段的 `__DSH_BRIDGE_ESCAPE__.appBase()` |
+| 4 | `CONTEXT_MENU_SCRIPT` | 恒注入 | 抑制系统 WebView 自带的右键菜单（页面的右键菜单自己 `preventDefault`） | 无 |
+| 5 | `bridge/webview-shim.js` | 仅 `browserGuests = true` | `<webview>` 自定义元素、DOM 观测与几何上报、状态事件差分 | 第 2 段暴露的 invoke 与第 1 段的 caps |
+
+三条纪律：
+
+- **`caps` 与 `webview-shim` 同生同死**：只有一个开关 `[dsh] browserGuests`（`config.dsh.browser_guests`，默认 `false`）。只开 caps 会让 Web UI 切到尚不可用的 `<webview>` 分支，只开 shim 则页面根本走不到它。
+- **只在主 frame 生效**：每段脚本各自用 `window.top === window` 守卫；guest 子 webview 不注入任何脚本（它是第三方页面）。
+- **不改页面结构、不 `eval`**：`<webview>` 兼容层只在页面自己 `createElement('webview')` 时通过 `customElements` 生效；其余几段只补 API。
 
 ## 2. 启动时序
 
@@ -145,10 +191,13 @@ e  刷写日志、释放单实例锁、退出
 | release 构建关闭 WebView 远程调试；调试构建的 `DSH_DEBUG_EVAL` 必须显式设环境变量才启用 | `cfg(debug_assertions)` + 环境变量 |
 | token 只存在于一次性认证请求；日志/错误页/崩溃报告都经脱敏 | `url_policy::redact_*`，`authenticate_host` 不返回 URL |
 | 不读不缓存不上传任何凭据 | `env_probe` 只记变量名与来源，壳不落盘任何值 |
+| guest 的任何 `invoke` 都被拒 | 不是代码而是 ACL：capability 没有 `remote` 上下文，guest 的 `https` origin 属于 Remote（`browser/commands.rs::assert_sender` 是纵深防御） |
+| guest 不允许导航到受权 origin（app server / Host / 旧路径 `web_url`） | `browser/policy.rs::allows_navigation` + `BlockedOrigins` |
+| guest 的新窗口、下载、权限请求一律拒绝 | `browser/guest.rs` 的 `on_new_window` / `on_download` / `on_permission_request` |
 
 ## 6. 关键决策（ADR）
 
-以下按时间顺序记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果。**当前有效的是 ADR-005 与 ADR-006**；ADR-001 / 003 / 004 保留原文，只在标题上标注状态，用来解释「为什么当初那样选」，不要拿它们当现状。
+以下按时间顺序记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果。**当前有效的是 ADR-005 到 ADR-008**（P3 新增 ADR-007 内嵌浏览器、ADR-008 媒体采集）；ADR-001 / 003 / 004 保留原文，只在标题上标注状态，用来解释「为什么当初那样选」，不要拿它们当现状。
 
 ### ADR-001 窗口装饰使用系统原生标题栏（已被 ADR-005 取代）
 
@@ -343,6 +392,112 @@ e  刷写日志、释放单实例锁、退出
 - Windows/Linux 未验证：Tauri 自定义 scheme 在 Windows 上是 `http://dsh-app.localhost`，CORS 白名单与 `data-platform` 都要按平台复核。
 - 回退开关：app server 本来也能直出 dist，若 shim 在某个插件上出问题，可把窗口 URL 切成 app server origin（同源、零 shim）作为逃生门，不影响 Host/代理/桥。
 
+> **2026-10-25 修订（`EventSource` 已由 P3 补上）**：上面「`EventSource` 不 shim」的结论**被推翻**，其余结论不变。原判断建立在「只有 hmr / documentpreview 用它，且都给绝对回环 URL」上；实际前端开发期用的是 `new EventSource('/api/…')`，相对路径会落到被缓冲的 `dsh-app:` handler 上（spike 实测 3 s 后才整段到达）。现在由 `src-tauri/bridge/media-shim.js` 按与 `fetch` / `XMLHttpRequest` **完全同一套规则**重写：相对路径与 `dsh-app://app/*` → 回环 app server；绝对 `http(s)://` / `blob:` / `data:` 原样放行；app 基址尚未交付时先排队、拿到 `appBase` 再建连（不抛错、不回退到 scheme）；**不做流处理** —— 不缓冲、不改事件、不改重连策略，SSE 语义仍由 WebKit 原生实现。它必须排在 `preload.js` 之后注入，正是为了复用 preload 暴露的 `__DSH_BRIDGE_ESCAPE__.appBase()`（见 [§1.2](#12-注入脚本与注入顺序)）。
+
+### ADR-007 内嵌浏览器 = Tauri 子 webview + `<webview>` 兼容层
+
+**决策**：Sidebar Browser 的 guest 用**窗口的子 webview**（`Window::add_child`，tauri 的 `unstable` feature）承载；页面里的 `<webview>` 元素由 `src-tauri/bridge/webview-shim.js` 映射成原生子 webview 的 `create / close / bounds / navigate / command`；每个 guest 一份**按 workspace 稳定的持久分区**；guest 的导航、新窗口、下载、权限请求一律在 Rust 侧拒绝，且**绝不允许导航到受权 origin**。整套能力由 `[dsh] browserGuests`（`config.dsh.browser_guests`，默认 `false`）一个开关控制，`caps` 与 shim 同生同死。
+
+**背景**（官方语义：`apps/desktop/src/browser-guests.ts` + `preload-browser.ts` + `packages/client/ui-sidebar-browser`）：Electron 用 `<webview>` 标签 + `WebContentsView`，主进程靠 `will-attach-webview` / `will-frame-navigate` / `will-redirect` / `setWindowOpenHandler` / `will-download` / `setPermissionRequestHandler` 六条钩子控住 guest，页面侧只拿到 lease 级的 `browser.acquire/release`。Tauri 没有 `<webview>` 标签、没有 `WebContentsView`、也没有子资源级请求拦截，但有等价的三件东西：`add_child` 建原生子视图、`WebviewBuilder` 的 `on_navigation` / `on_new_window` / `on_download` / `on_permission_request` 四个钩子、以及 `initialization_script` 让兼容层跑在页面脚本之前。
+
+**与官方的对应关系**：
+
+| 官方（Electron） | 本仓库 | 位置 |
+|---|---|---|
+| `session.fromPartition(...)` 隔离存储 | `data_store_identifier`（macOS ≥ 14）/ `data_directory`（Win/Linux） | `browser/partition.rs` |
+| `will-attach-webview`（lease + partition 校验） | `desktop_browser_guest_attach` 的四道校验（lease 存在 / owner 匹配 / partition 匹配 / 未重复挂载） | `browser/lease.rs`、`browser/commands.rs` |
+| `will-frame-navigate` / `will-redirect` | `WebviewBuilder::on_navigation` | `browser/policy.rs::allows_navigation` |
+| `setWindowOpenHandler` → deny + 上报 | `on_new_window → Deny` + `browser-open-requested` 事件 | `browser/guest.rs` |
+| `will-download` → `preventDefault` | `on_download` 返回 `false` + `browser-download-blocked` 事件 | `browser/guest.rs` |
+| `setPermissionRequestHandler(false)` | `on_permission_request → Deny` | `browser/guest.rs` |
+| `did-navigate` / `did-stop-loading` / `page-title-updated` | `on_page_load` / `on_document_title_changed` → `browser-guest-state` 快照 → shim 差分派发同名 DOM 事件 | `browser/guest.rs` + `bridge/webview-shim.js` |
+| Chromium history 的 `canGoBack` / `goBack` | 线性历史模型：`goBack` = 重新导航到记录里的 URL（不是历史恢复） | `browser/history.rs` |
+| `did-fail-load`、`guest.on('login')` | **无等价物**（见「后果」） | — |
+
+**安全边界：ACL 判定的是 origin，不是 label**（本 ADR 最重要的一条）
+
+- Tauri v2 的 ACL 由 capability 的 **`remote` 上下文**决定某个 webview 能不能调命令：`src-tauri/capabilities/default.json` 只列了 `windows: ["main"]` / `webviews: ["header", "content"]` 与 `core:default`，**没有** `remote: { urls: [...] }`。所以只有**本地 origin**（`dsh-app://app`、`tauri://localhost`）上的 webview 能 `invoke`。
+- 每个 guest 都是第三方 `https` 页面 = **Remote origin** → 它在 ACL 层就没有任何命令权限，`invoke` 全被拒。这一条**不依赖** label，也不依赖我们写的任何一行代码。
+- guest 仍然用独立 label `browser-guest-<n>`，但那只是**双保险**（便于排查，也挡住将来「给 guest label 加 capability」这种误配），不是安全边界。
+- 纵深防御在 `browser/commands.rs::assert_sender`：只接受 `content` webview + `dsh-app://app` 文档 origin，与 `bridge::assert_sender` 同一套规则。
+- **capabilities 保持原样**：不新增 `browser-guest-*`，不给任何 guest 授权。想「方便调试」而给 guest 开 capability，等于把桥暴露给任意第三方页面。
+
+**guest 绝不允许导航到受权 origin**：受权面有三层，全部登记进 `BlockedOrigins`（`browser/policy.rs`）——① 回环 app server（`BridgeState::app_base()`，动态流量的代理，持 Host cookie）；② Desktop Host 自己的 origin（`AppRuntime::host_origin`，即 `dsh web` 的监听地址）；③ 旧路径的 `web_url`（附着模式）。理由：这些 origin 背后是持 cookie 的代理，放行等于让第三方页面借壳拿到已认证 API；「反正要 cookie 认证」不是策略——guest 根本不该发出这类请求。同理，`http(s)` 里带内嵌凭据（`user:pass@`）的 URL 也拒绝。
+
+**被否掉的替代方案与代价**：
+
+| 方案 | 代价 | 结论 |
+|---|---|---|
+| 沿用 Web UI 自带的 iframe 面板 | 零成本，但拿不到跨站隔离、下载/新窗口策略、按来源分区，且官方语义就是原生 guest | 否掉，**但保留为回退**：`browserGuests = false` 时页面继续走 iframe，与 P2 行为完全一致 |
+| 主窗口改成 `WebviewWindow` 再叠 guest | 要重做 ADR-005 的双 webview 布局（`header` 40 DIP + `content`） | 否掉 |
+| 一个 guest 一个独立原生窗口 | Tauri 子 webview 已是独立 WebView 实例，再拆窗口会丢掉「随内容滚动/裁切」 | 否掉 |
+| 给 guest 开 capability 让它能 invoke | 把桥暴露给任意第三方页面 | 否掉：ACL 的 origin 边界是这套设计的地基 |
+| 照官方用**内存**分区（`fromPartition` 无 `persist:` 前缀） | 每次启动丢登录态，侧栏站点要反复登录 | 有意改为**持久**分区（见下） |
+
+**与官方的有意差异：持久分区**。官方用 `session.fromPartition("dsh-sidebar-browser-<uuid>")`（没有 `persist:` 前缀）= 内存分区：进程内同 workspace 的多标签共享，退出即丢。本仓库按 [desktop-parity §6.4](desktop-parity.md) 的目标实现**按 workspace 稳定**的持久分区：`browser/partition.rs::partition_id` 把 workspace key 双盐哈希成固定标识，同一 workspace 每次启动落回同一份 cookie/localStorage，不同 workspace 互相隔离。理由是侧栏浏览器承载的是用户**已经登录**的第三方站点（文档、issue、后台），每次重启都要重新登录不可接受。承载方式：macOS ≥ 14 走 `WKWebsiteDataStore.dataStoreForIdentifier:`；Windows/Linux 走该 guest 独占的 `WebContext` 数据目录（与 content webview 不共享）。**已知限制**：macOS < 14 上 wry 会静默回落到默认 data store，分区不再隔离。
+
+**其余实现要点**：
+
+1. **两级所有权**：`workspace → 分区`（跨标签、跨重启稳定）与 `lease → guest`（一次 `acquire` 一个 lease；`release` 只销毁自己那个 guest，分区保留）。workspace 必须 1..=4096 字符；只有发起 `acquire` 的 webview 能释放自己的 lease；未知 lease 幂等成功（与官方 IPC 校验一致）。
+2. **锁纪律**：`BrowserState` 的互斥量持锁期间只改表；webview 操作一律在锁外做，因为 Tauri 的 dispatcher 调用在部分平台会回到主线程，而回调本身就在主线程上。
+3. **几何**：页面侧用 `ResizeObserver` / `IntersectionObserver` / `scroll` / `resize` / `visibilitychange`，加 500 ms 兜底，把 CSS px 矩形报上来；Rust 换算物理像素、裁剪到 content webview 可见区，再 `set_bounds` / `show` / `hide`。元素本身只是占位，原生视图浮在页面之上。
+4. **回收的三个时机**（对应官方 `releaseAll`）：content 主 frame 换文档（`on_navigation`）、窗口关闭或进程退出（`lifecycle::shutdown`）、元素 `disconnectedCallback`。
+5. **两段式导航**：guest 先建在 `about:blank`，真正的目标 URL 由页面 `loadURL()` 发起并在 Rust 侧过一次白名单——等价于官方「lease 先到、导航后到」。
+
+**后果**：
+
+- 新增一条**默认关闭**的能力路径：`browserGuests = false` 时 caps 与 shim 都不注入，页面继续用 iframe 面板；打开后 Web UI 才切到原生 guest。这个开关是**同一个**，只开一边会让页面走进没有实现的 `<webview>` 分支（白屏）。
+- 已知差异（需回填 desktop-parity §9）：没有 `did-fail-load` 等价回调（只有「建 guest 失败」会派发它）、`goBack` 是重新导航而非历史恢复（表单状态/滚动位置不保留）、`element.style` 的滤镜/透明度/overflow 不影响原生视图、guest 弹不出原生认证框、没有子资源级请求拦截。
+- **真机验收未完成**：几何同步、分区隔离、下载/新窗口拦截、多标签回收只有单测覆盖，尚无 macOS/Windows 真机证据；因此默认保持关闭。
+
+### ADR-008 媒体采集 = 原生 AVCaptureSession + Channel 推 PCM + 页面合成 MediaStream
+
+**决策**：macOS 的麦克风走**原生采集**（`AVCaptureSession` + `AVCaptureAudioDataOutput`），PCM 经 Tauri `Channel<InvokeResponseBody>` 以二进制帧推给页面，由 `src-tauri/bridge/media-shim.js` 用 `ScriptProcessorNode` + `MediaStreamAudioDestinationNode` 合成一个真的 `MediaStream`，冒充 `navigator.mediaDevices.getUserMedia()` 的返回值。前端（语音输入插件）**一行不改**。
+
+**背景**（证据见 [spikes/media-input.md](spikes/media-input.md)，全部为真机实测）：WKWebView 不实现 Media Capture —— `navigator.mediaDevices` 与 `navigator.getUserMedia` 都是 `undefined`，而 `navigator.permissions.query({name:'microphone'})` 却返回 `prompt`（极具误导性）。唯一的消费者 `@deepseek-ai/dsh-experimental-client-ui-voice-input` 只认 `getUserMedia` + `MediaRecorder` + `decodeAudioData`，所以只能在页面里**凭空造一个活的 MediaStream**。
+
+**被否掉的路线**：
+
+| 路线 | 为什么否掉 |
+|---|---|
+| 让 WKWebView 直接支持 `getUserMedia`（WebRTC / 私有开关） | 无公开 API；`WKUIDelegate.requestMediaCapturePermissionFor` 只在 iOS 生效，且底层仍要求 Media Capture 实现 |
+| `MediaStreamTrackGenerator` + `AudioData`（WebCodecs 正路） | 该构造器在 WKWebView 里不存在（`typeof === "undefined"`） |
+| `AudioWorklet` 生成采样 | `ctx.audioWorklet` 是 `undefined`，`addModule` 直接抛 TypeError |
+| 只做 Rust 侧采集与转写、页面不拿 MediaStream | 要改前端（电平、录制、WAV 重编码都在页面侧），且偏离官方语义 |
+| `AVAudioEngine.inputNode` tap 代替 `AVCaptureSession` | 会引动输出设备（`mainMixerNode`），易与正在播放的音频打架；`AVCaptureSession` 与 TCC/设备枚举是同一套模型，和官方权限模型对齐 |
+| 页面侧 `MediaRecorder` 换成 Rust 编码（AVAssetWriter） | 要复刻插件「mp4 → `decodeAudioData` → 16 kHz WAV → base64 上传」的约定，纯属绕远 |
+
+**为什么恰好是 `ScriptProcessorNode` + `MediaStreamAudioDestinationNode`**：前者是 WKWebView 里**唯一可用**的「把外部采样灌进音频图」的通道（deprecated 但可用；48 kHz 下 1024 帧块在 900 ms 内回调 42 次 ≈ 理论值 42.2）；后者能把任意音频图变成一个带 `readyState=live` 音频 track 的 `MediaStream`。spike 验过端到端电平保真：写入幅度 0.5 的 440 Hz 正弦，`MediaRecorder` 录回后 `decodeAudioData` 的 peak 0.505 / rms 0.351。
+
+**帧协议**（壳 → 页面，走 `Channel<InvokeResponseBody>`）：
+
+| 帧 | 内容 |
+|---|---|
+| 首帧 | 一段 JSON（`media::MicStreamHeader`：`type:"open"` + `sampleRate` / `channelCount` / `framesPerFrame` / `format:"f32le"` / `deviceId` / `groupId` / `label` / 三个处理标志），页面据此建 `AudioContext({sampleRate})` 与 `ScriptProcessor` |
+| 后续 | 小端 f32 二进制：**48 kHz / 单声道 / 20 ms** = 960 采样 = 3840 B/帧（≈192 KB/s） |
+
+选 `Channel` 而不是 event：`send(Raw(Vec<u8>))` 直推二进制；同一份数据走 JSON event 会膨胀成约 500 KB/s 的文本，还要让页面每 20 ms `JSON.parse` 一次。JS 侧只需 `transformCallback` + 传 `"__CHANNEL__:<id>"` 字符串，不依赖 `@tauri-apps/api`。
+
+**源格式差异在壳侧消化**（`media/pcm.rs`，纯函数、可单测）：源可能是 f32 非交错或 i16 交错，采样率可能是 44.1/48/96 kHz，统一做「下混单声道 → 重采样到页面采样率 → 定长分帧 → f32le 编码」。页面 `AudioContext` 固定 48 kHz，壳按页面请求的采样率出帧，页面侧不再重采样。
+
+**权限状态机**（`media/permission.rs` + `media/session.rs`）：TCC 的 `notDetermined` / `restricted` / `denied` / `granted` / `unknown` 先映射成启动决策；会话状态机 `idle → requesting → starting → live → stopping → failed` 把每个副作用（请求授权、开/关采集、发状态事件）以 `Action` 返回，因此**迟到的信号不会复活已经停掉的会话**（授权窗关得比页面停止还慢时，随后到来的 `Opened` 被丢弃）。三个系统事实写进了实现：
+
+1. 授权**之前**系统不列任何音频设备，所以「设备清单为空」不能判成「机器没有麦克风」——必须先问 TCC 再重新枚举；
+2. TCC 授权窗按 bundle 只弹一次，`Info.plist` 缺 `NSMicrophoneUsageDescription` 时弹窗根本不出现、数据全是静音（本项目已加）；
+3. 采样委托回调在**非主线程**的串行队列上，回调里只做「取字节 + 推帧」，不做任何窗口/UI 调用。
+
+**页面侧三个必要动作**（`bridge/media-shim.js`）：① `AudioContext` 必须在 `getUserMedia()` 的同一个用户手势任务里**同步**创建并 `resume()`，否则 WebKit 可能把它挂在 `suspended`、`ScriptProcessor` 永不回调；② `track.stop()` 必须包一层（插件正是用 `stream.getTracks().forEach(t => t.stop())` 停止），包装后先调原生 `stop`、再拆 Rust 会话、并**手补 `ended` 事件**（原生合成轨 `stop()` 只把自己置成 ended，不派发事件）；③ `enumerateDevices()` 与 `track.getSettings()` 由壳侧数据补齐（`groupId` 用设备 `uniqueID` 顶替）。
+
+**失败降级的边界**：整条链**任何一步失败都只 `console.warn` 并抛 `NotSupportedError` / `NotAllowedError`，绝不打断页面启动**。麦克风是可选能力，不能在语音插件初始化失败时把整个 Web UI 带下水。非 macOS 平台由 `media/unsupported.rs` 提供同名实现（固定 `unsupported`），页面按 `NotSupportedError` 处理，而不是「命令找不到」。
+
+**后果**：
+
+- `ScriptProcessorNode` 在主线程跑，极端卡顿会丢块；页面侧 `PcmRing` 的 `dropped`/`starved`/`overruns` 计数与 `__DSH_MEDIA__.diagnostics()` 就是为这种情况留的观测口。
+- 端到端延迟预期 60–120 ms（20 ms 帧 + 21.3 ms 块 + `MediaRecorder` 缓冲）：语音输入够用，实时通话不够。
+- 设备时钟与 `AudioContext` 时钟不同源，长时间录制靠「欠载补静音 / 积压丢最旧」硬扛，未做基于时间戳的相位追踪；只输出单声道（立体声阵列先下混）。
+- Windows/Linux 的原生采集（WASAPI / PipeWire）未实现。
+- **接线位置**：`desktop_microphone_{status,start,stop}` 三条命令在 `bridge.rs`（薄壳，转调 `media::macos` / `media::unsupported` 的同名函数），`media-shim.js` 由 `bridge::bridge_script()` 拼在 `preload.js` 之后注入；wire 契约见 [bridge-contract.md](bridge-contract.md)。真机验收步骤见 [spikes/media-input.md §8](spikes/media-input.md)。
+
 ## 7. 落地对照
 
 | 能力 | 实现位置 |
@@ -364,5 +519,52 @@ e  刷写日志、释放单实例锁、退出
 | 停止子进程、不留孤儿 | `dsh-lite-core::job`（Windows Job Object / Unix 进程组） |
 | 检查 dsh 更新（`npm view`，只报告不安装） | `dsh-lite-core::update` + `main.rs::check_update` |
 | 托盘 / 应用菜单 | `src-tauri/src/{tray,menu,menubar}.rs` |
-| 单实例 | `tauri-plugin-single-instance` |
+| 单实例 | `tauri-plugin-single-instance` + `lifecycle::handle_second_instance`（见 [§8.2](#82-单实例)） |
+| 深链 `dsh://open` | `platform::register_deep_link`（注册）+ `platform/deeplink`（解析）+ `lifecycle::handle_deep_link`（见 [§8.1](#81-深链-dshopen)） |
+| 退出确认 | `lifecycle::{quit,resolve_quit_prompt,inspect_quit}` + `dsh-lite-core::desktop_host::inspect_quit`（见 [§8.4](#84-退出确认与进程回收)） |
+| 关闭策略 / 一次性后台提示 | `lifecycle::{close_decision,hide_to_background}`（见 [§8.4](#84-退出确认与进程回收)） |
+| 崩溃报告 / 致命恢复 | `lifecycle::{report_fatal,install_panic_hook,verify_shell_documents}` + `dsh-lite-core::logging::write_crash_report`（见 [§8.5](#85-崩溃报告与致命恢复)） |
+| 内嵌浏览器（子 webview + `<webview>` 兼容层） | `src-tauri/src/browser/**` + `bridge/webview-shim.js`（ADR-007，默认关闭） |
+| 麦克风（原生采集 + 页面合成） | `src-tauri/src/media/**` + `bridge/media-shim.js` + `bridge::desktop_microphone_*`（ADR-008） |
+| `EventSource` 重写 | `bridge/media-shim.js`（ADR-006 的 2026-10-25 修订） |
 | 设置写回 `config.toml` | `main.rs::save_settings` |
+
+## 8. 原生壳行为（P3/P4）
+
+这一节记录「窗口之外」的能力落在哪、边界在哪。实现分布在 `src-tauri/src/{lifecycle,platform,tray,menu,window,scheme}.rs`，两个调度点是 `platform::install_shell_entry`（启动期挂载）与 `platform::handle_run_event`（运行期事件）。
+
+### 8.1 深链 `dsh://open`
+
+| 项 | 事实 |
+|---|---|
+| 唯一语义 | `dsh://open`（含 `dsh://open/`）= **显示、恢复并聚焦主窗口**。不导航、不建窗、不解析参数；其它 `dsh://*` 只记日志并忽略（与官方 `open-url` 一致） |
+| 注册 | macOS：bundle `Info.plist` 的 `CFBundleURLTypes/CFBundleURLSchemes=[dsh]`（`src-tauri/Info.plist`，运行期只校验、不写）；Windows：`HKCU\Software\Classes\dsh` 四值（`platform/windows.rs`，经 `reg.exe`，免提权）；Linux：`~/.local/share/applications/*.desktop` + `xdg-mime default` |
+| 分发 | macOS 走 `RunEvent::Opened { urls }`（Electron `open-url` 的等价物）；Windows/Linux 的深链是**第二个实例的 argv**，由 `lifecycle::handle_second_instance` 认出来 |
+| 解析 | `platform::deeplink::{classify,first_open}`（纯逻辑、无 tauri 依赖、三平台同测）：大小写不敏感、允许尾斜杠、带 query/fragment 视为不受支持 |
+| 打包门槛 | 只有 release 构建（或显式 `DSH_DESKTOP_DEV_APP=1`）才注册，避免开发二进制抢走已安装应用的 scheme |
+
+### 8.2 单实例
+
+`tauri-plugin-single-instance` 提供进程级互斥；第二个实例的参数交给 `lifecycle::handle_second_instance`：先聚焦已有窗口，再消费 argv 里的深链；返回 `false`（不是深链）时 `main.rs` 继续按 `--url` / `--port` 附着到指定目标。主窗口从不销毁，所以「第二次启动」永远是「叫回同一个窗口」。
+
+### 8.3 托盘与菜单
+
+- 官方托盘只有「打开应用 + 分隔线 + 退出应用」，且**只在 win32 建**（macOS 走应用菜单 + Dock）。本仓库按 `项目要求.md` FR-6 在 **Windows 与 Linux** 都建托盘，并把壳自己的动作（重新加载 / 设置 / 日志）放在官方那两项之间。
+- 左键点击 = **打开并聚焦**（官方 `tray.on('click', open)`），不做 toggle：托盘是隐藏窗口的唯一回路，点击再把它藏起来等于撤销用户刚做的操作。
+- macOS 应用菜单、`RunEvent::Reopen`（Dock 点击）按官方 `activate`：**只有当前没有可见窗口时**才聚焦，AppKit 自己会把可见窗口提到前面。
+
+### 8.4 退出确认与进程回收
+
+- **每条退出路径都过同一个确认**（`lifecycle::quit`）：窗口关闭（`closeAction = quit`）、托盘退出、应用菜单、⌘Q、设置页按钮，以及**不经过我们代码的退出**（Dock 菜单 Quit、`osascript`）——后者由 `platform::handle_run_event` 拦 `RunEvent::ExitRequested`：未批准就 `prevent_exit()` 再走确认（官方 `before-quit` 的等价物），已批准才放行。`app.exit()` 不会被自己二次追问（`lifecycle::approve_exit`）。
+- **问 Host 会打断什么**：`dsh_lite_core::desktop_host::inspect_quit(QUIT_INSPECTION_DEADLINE)`——stdin 一行 `{"type":"quit-inspection"}`，stdout 一行 `DSH_HOST_CONTROL {"type":"quit-inspection","activeTasks":…,"scheduledTasks":…}`，**2 s 超时**。语义照官方：没有 Host → 直接放行不弹框；读不到答案（超时 / 通道不可用 / 拒绝）→ 视为有活动任务 → 弹框警告；文案三种（只中断运行中 / 只影响定时 / 两者）。
+- **一次一个决定**：重复的退出请求只把窗口提到前面，不叠对话框；取消则一切继续运行。
+- **回收顺序固定在 `lifecycle::shutdown`**（唯一的回收点）：浏览器 guest → 旧路径子进程 → Host 与 app server → 落窗几何。进程组 / Job Object 兜底，壳被强杀也不留孤儿。
+- **关闭策略**：`close_decision()` 把「隐藏还是退出」算成一个纯函数（`项目要求.md` FR-5 的默认值：macOS 首次启动把 `quit` 视作 `hide`，Win/Linux 默认 `quit`），外加官方的**一次性后台提示**（`hide_to_background`：只在托盘平台弹、marker 落在数据目录、只弹一次）。官方「关窗永远 hide」被记录为有意差异。
+
+### 8.5 崩溃报告与致命恢复
+
+- **落盘复用** `dsh_lite_core::logging::write_crash_report`：`<日志目录>/crash-<UTC compact>-<source>.log`，`CrashSource::{Startup,Renderer,Shell}`，正文整体脱敏，只保留最近 10 份（按修改时间清理），不打扰滚动日志。
+- **先写文件、再弹框**（`lifecycle::report_fatal`）：对话框只显示错误尾部 8 行 + 报告路径 + 重装建议（1200 字符预算），按钮「退出 / 重新启动」；写文件失败也照常弹框——诊断不能阻塞恢复。
+- **两个触发点**：① 自带文档缺失（`lifecycle::verify_shell_documents` 启动时校验 `loading.html` / `error.html` / `settings.html` / `index.html`，这类安装损坏原本只会白屏）；② 启动线程 panic（`lifecycle::guarded_startup`）。
+- **panic 兜底**：`lifecycle::install_panic_hook` 让未捕获 panic 至少落一份报告。它**只写文件不弹窗**：在 panic 中途弹 UI 可能死锁那个线程。
+- **与官方相比缺的部分**：渲染层 error 级 console 尾部（官方 64 KiB `RendererConsoleTail`）仍只进滚动日志的 `page error:` 行、未进报告文件；「禁用第三方插件」按钮不做（本项目不管理插件安装）。

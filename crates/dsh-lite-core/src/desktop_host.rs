@@ -44,6 +44,16 @@ pub const READY_PREFIX: &str = "DSH_HOST_READY ";
 /// Prefix of the fatal line printed by the launcher.
 pub const FATAL_PREFIX: &str = "DSH_HOST_FATAL ";
 
+/// Prefix of a control answer printed by the launcher.
+///
+/// Control answers are asked for over stdin (one JSON object per line) and are
+/// the only stdout lines the shell reads *after* the ready handshake.
+pub const CONTROL_PREFIX: &str = "DSH_HOST_CONTROL ";
+
+/// Deadline the shell allows one quit inspection before it treats the answer as
+/// unknown and warns before quitting (the official shell uses 2 s).
+pub const QUIT_INSPECTION_DEADLINE: Duration = Duration::from_secs(2);
+
 /// Environment variable the desktop profile's telemetry validates.
 pub const CLIENT_VERSION_VAR: &str = "DSH_CLIENT_VERSION";
 
@@ -384,6 +394,92 @@ pub fn parse_fatal_line(line: &str) -> Option<HostFatal> {
     })
 }
 
+/// What quitting the Host now would interrupt.
+///
+/// Mirrors the official `DesktopQuitInspection`: `active_tasks` counts work the
+/// update-restart check also counts (running agents, queued messages, live jobs);
+/// `scheduled_tasks` counts armed reminders in sessions loaded by this process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuitInspection {
+    /// Whether stopping the Host would interrupt running work.
+    pub active_tasks: bool,
+    /// Whether a loaded session holds an armed scheduled reminder.
+    pub scheduled_tasks: bool,
+}
+
+impl QuitInspection {
+    /// Whether quitting should ask first.
+    pub const fn interrupts_work(self) -> bool {
+        self.active_tasks || self.scheduled_tasks
+    }
+}
+
+/// Why a control request produced no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostControlError {
+    /// The Host already stopped, or its stdout closed.
+    Unavailable,
+    /// The Host did not answer within the deadline.
+    Timeout { after: Duration },
+    /// The Host answered with an error (it could not inspect).
+    Refused(String),
+}
+
+impl std::fmt::Display for HostControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(f, "the desktop host is not running"),
+            Self::Timeout { after } => write!(
+                f,
+                "the desktop host did not answer within {} ms",
+                after.as_millis()
+            ),
+            Self::Refused(message) => write!(f, "the desktop host refused: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for HostControlError {}
+
+#[derive(Debug, Deserialize)]
+struct ControlLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default, rename = "activeTasks")]
+    active_tasks: bool,
+    #[serde(default, rename = "scheduledTasks")]
+    scheduled_tasks: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Parses one stdout line into a quit-inspection answer.
+///
+/// A line that is not a control answer, or an answer to a different request,
+/// returns `None`; an answer carrying `error` returns the refusal, because the
+/// shell must then warn instead of quitting silently.
+pub fn parse_quit_inspection_line(line: &str) -> Option<Result<QuitInspection, HostControlError>> {
+    let rest = line.trim().strip_prefix(CONTROL_PREFIX)?;
+    let parsed: ControlLine = serde_json::from_str(rest).ok()?;
+    if parsed.kind != "quit-inspection" {
+        return None;
+    }
+    if let Some(error) = parsed.error {
+        return Some(Err(HostControlError::Refused(url_policy::redact_text(
+            &error,
+        ))));
+    }
+    Some(Ok(QuitInspection {
+        active_tasks: parsed.active_tasks,
+        scheduled_tasks: parsed.scheduled_tasks,
+    }))
+}
+
+/// Serializes one control request as the single stdin line the launcher reads.
+pub fn quit_inspection_request() -> String {
+    "{\"type\":\"quit-inspection\"}\n".to_owned()
+}
+
 /// Reads the version the installed dsh reports, and gates it.
 ///
 /// The launcher repeats this check inside the Host process (that copy is what
@@ -409,6 +505,11 @@ pub fn probe_version(spec: &HostSpec, deadline: Duration) -> Result<VersionGate,
 pub struct DesktopHost {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
+    /// Every further stdout line the launcher writes after the ready handshake.
+    ///
+    /// Only control answers are supposed to arrive here; anything else is
+    /// skipped while a control request waits for its answer.
+    lines: mpsc::Receiver<String>,
     pid: u32,
     ready: HostReady,
     stderr_tail: SharedTail,
@@ -430,6 +531,41 @@ impl DesktopHost {
     /// Retained stderr tail, token-redacted.
     pub fn stderr_tail(&self) -> String {
         tail_text(&self.stderr_tail)
+    }
+
+    /// Asks the Host what a quit would interrupt.
+    ///
+    /// `deadline` bounds the wait. A Host that does not answer, or that already
+    /// stopped, reports an error: callers must treat that as *unknown* work and
+    /// ask before quitting, never as "nothing is running".
+    pub fn inspect_quit(&mut self, deadline: Duration) -> Result<QuitInspection, HostControlError> {
+        {
+            let stdin = self.stdin.as_mut().ok_or(HostControlError::Unavailable)?;
+            stdin
+                .write_all(quit_inspection_request().as_bytes())
+                .and_then(|()| stdin.flush())
+                .map_err(|_| HostControlError::Unavailable)?;
+        }
+        let started = Instant::now();
+        loop {
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(HostControlError::Timeout { after: deadline });
+            }
+            match self.lines.recv_timeout(remaining) {
+                // A stray chatter line is not this request's answer; keep waiting
+                // inside the deadline instead of failing the inspection.
+                Ok(line) => {
+                    if let Some(answer) = parse_quit_inspection_line(&line) {
+                        return answer;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(HostControlError::Timeout { after: deadline });
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(HostControlError::Unavailable),
+            }
+        }
     }
 
     /// Asks the Host to stop, escalating after `grace`. Repeated calls are no-ops.
@@ -548,6 +684,7 @@ pub fn spawn(spec: &HostSpec, deadline: Duration) -> Result<DesktopHost, HostErr
                     return Ok(DesktopHost {
                         child: Some(child),
                         stdin: Some(stdin),
+                        lines: line_receiver,
                         pid,
                         ready,
                         stderr_tail,
@@ -676,6 +813,63 @@ mod tests {
         assert!(parse_ready_line("dsh web: http://127.0.0.1:1/?token=x").is_none());
         assert!(parse_ready_line("DSH_HOST_READY not-json").is_none());
         assert!(parse_ready_line("").is_none());
+    }
+
+    #[test]
+    fn a_control_answer_reports_the_inspection() {
+        let answer = parse_quit_inspection_line(
+            r#"DSH_HOST_CONTROL {"type":"quit-inspection","activeTasks":true,"scheduledTasks":false}"#,
+        )
+        .expect("control answer")
+        .expect("inspection");
+        assert_eq!(
+            answer,
+            QuitInspection {
+                active_tasks: true,
+                scheduled_tasks: false,
+            }
+        );
+        assert!(answer.interrupts_work());
+    }
+
+    #[test]
+    fn a_control_refusal_is_not_a_silent_all_clear() {
+        let answer = parse_quit_inspection_line(
+            r#"DSH_HOST_CONTROL {"type":"quit-inspection","activeTasks":true,"scheduledTasks":false,"error":"task services are unavailable"}"#,
+        )
+        .expect("control answer")
+        .expect_err("refusal");
+        assert!(matches!(answer, HostControlError::Refused(_)));
+        // The message is redacted like every other Host diagnostic.
+        let refused = parse_quit_inspection_line(
+            r#"DSH_HOST_CONTROL {"type":"quit-inspection","error":"failed at http://127.0.0.1:1/?token=secret"}"#,
+        )
+        .expect("control answer")
+        .expect_err("refusal");
+        let text = refused.to_string();
+        assert!(!text.contains("secret"), "text: {text}");
+    }
+
+    #[test]
+    fn other_lines_are_not_control_answers() {
+        // A different request type, chatter, and a ready line are all skipped.
+        assert!(
+            parse_quit_inspection_line(
+                r#"DSH_HOST_CONTROL {"type":"update-tasks","activeTasks":true}"#
+            )
+            .is_none()
+        );
+        assert!(parse_quit_inspection_line("desktop host: starting").is_none());
+        assert!(parse_quit_inspection_line(&ready_line("[]")).is_none());
+        assert!(parse_quit_inspection_line("DSH_HOST_CONTROL not-json").is_none());
+    }
+
+    #[test]
+    fn the_quit_request_is_one_json_line() {
+        assert_eq!(
+            quit_inspection_request(),
+            "{\"type\":\"quit-inspection\"}\n"
+        );
     }
 
     #[test]
@@ -942,5 +1136,79 @@ printf '%s' "$line" > "$(dirname "$0")/stdin.txt"
         assert_eq!(recorded, "shutdown");
         // The marker path is only used to prove stdin was written.
         assert!(marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_quit_waits_for_the_control_answer() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let node = fake_node(
+            directory.path(),
+            r#"printf '%s\n' 'DSH_HOST_READY {"url":"http://127.0.0.1:54570/?token=abc","injections":[]}'
+read line
+printf '%s' "$line" > "$(dirname "$0")/request.txt"
+printf '%s\n' 'DSH_HOST_CONTROL {"type":"quit-inspection","activeTasks":false,"scheduledTasks":true}'
+"#,
+        );
+        let spec = spec_for(node, directory.path());
+        let mut host = spawn(&spec, Duration::from_secs(5)).expect("ready");
+        let inspection = host
+            .inspect_quit(Duration::from_secs(5))
+            .expect("inspection");
+        assert_eq!(
+            inspection,
+            QuitInspection {
+                active_tasks: false,
+                scheduled_tasks: true,
+            }
+        );
+        assert!(inspection.interrupts_work());
+        let request =
+            std::fs::read_to_string(directory.path().join("request.txt")).expect("request marker");
+        assert_eq!(request, quit_inspection_request().trim_end());
+        host.stop(Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_quit_reports_a_refusal_the_shell_can_warn_about() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let node = fake_node(
+            directory.path(),
+            r#"printf '%s\n' 'DSH_HOST_READY {"url":"http://127.0.0.1:54570/?token=abc","injections":[]}'
+read line
+printf '%s\n' 'DSH_HOST_CONTROL {"type":"quit-inspection","activeTasks":true,"scheduledTasks":false,"error":"task services are unavailable"}'
+"#,
+        );
+        let spec = spec_for(node, directory.path());
+        let mut host = spawn(&spec, Duration::from_secs(5)).expect("ready");
+        let error = host
+            .inspect_quit(Duration::from_secs(5))
+            .expect_err("refusal");
+        assert!(matches!(error, HostControlError::Refused(_)), "{error:?}");
+        host.stop(Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_quit_times_out_when_the_host_stays_silent() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let node = fake_node(
+            directory.path(),
+            r#"printf '%s\n' 'DSH_HOST_READY {"url":"http://127.0.0.1:54570/?token=abc","injections":[]}'
+read line
+sleep 30
+"#,
+        );
+        let spec = spec_for(node, directory.path());
+        let mut host = spawn(&spec, Duration::from_secs(5)).expect("ready");
+        let error = host
+            .inspect_quit(Duration::from_millis(150))
+            .expect_err("timeout");
+        assert!(
+            matches!(error, HostControlError::Timeout { .. }),
+            "{error:?}"
+        );
+        host.stop(Duration::from_secs(5));
     }
 }

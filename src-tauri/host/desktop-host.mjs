@@ -28,8 +28,20 @@
  * payload is never split or truncated. stdout is reserved for the protocol; all
  * diagnostics go to stderr.
  *
+ * One further protocol line answers a control request (see `stdin` below):
+ *   DSH_HOST_CONTROL <json>  {"type":"quit-inspection","activeTasks":false,
+ *                             "scheduledTasks":false,"error":"…"?}
+ *
  * stdin: the line `shutdown` asks for a graceful stop; closing stdin does the
  * same. SIGTERM/SIGINT are treated as shutdown too.
+ *
+ * stdin, control requests: one JSON object per line. `{"type":"quit-inspection"}`
+ * asks what quitting now would interrupt; the answer is one `DSH_HOST_CONTROL`
+ * line whose `activeTasks` follows the official `dsh-desktop-host` rule
+ * (a running agent, queued inbox messages, or a running/stopping job) and whose
+ * `scheduledTasks` counts armed reminders in the loaded sessions. A Host that
+ * cannot answer reports `activeTasks: true` with an `error`, so the shell warns
+ * before quitting instead of quitting silently.
  *
  * Usage:
  *   node desktop-host.mjs --dsh <path/to/@deepseek-ai/dsh> --project <profileDir> [--version <v>]
@@ -87,7 +99,11 @@ function claimStdout() {
   process.stdout.write = (chunk, encoding, callback) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
     const done = typeof encoding === 'function' ? encoding : callback
-    if (text.startsWith('DSH_HOST_READY ') || text.startsWith('DSH_HOST_FATAL ')) {
+    if (
+      text.startsWith('DSH_HOST_READY ') ||
+      text.startsWith('DSH_HOST_FATAL ') ||
+      text.startsWith('DSH_HOST_CONTROL ')
+    ) {
       return write(text, done)
     }
     // The token is redacted here as well: the shell redacts its own tails, but a
@@ -227,6 +243,57 @@ async function refuseVersion(gate, source) {
   process.exitCode = 1
 }
 
+/**
+ * Whether stopping now would interrupt work, mirroring the official
+ * `dsh-desktop-host` rule: a running agent (including subagents and turns
+ * waiting for approval), queued inbox messages, or a running/stopping job.
+ */
+function hasActiveTasks(agents, jobs) {
+  const liveAgents = agents.list()
+  if (
+    liveAgents.some(
+      (agent) =>
+        agent.status === 'running' ||
+        agent.inbox?.nextTurn?.length > 0 ||
+        agent.inbox?.nextStep?.length > 0,
+    )
+  ) {
+    return true
+  }
+  return [undefined, ...liveAgents].some((agent) =>
+    jobs.list(agent?.id).some((job) => job.status === 'running' || job.status === 'stopping'),
+  )
+}
+
+/**
+ * Inspects what a quit would interrupt.
+ *
+ * `scheduledTasks` only counts reminders of sessions loaded in this process:
+ * a reminder in a never-loaded session cannot fire, so it is not counted.
+ */
+async function inspectQuit(ctx) {
+  const agents = ctx.get('agents')
+  const jobs = ctx.get('jobs')
+  if (agents === undefined || jobs === undefined) {
+    throw new Error('desktop quit: task services are unavailable')
+  }
+  const liveAgents = agents.list()
+  const activeTasks = hasActiveTasks(agents, jobs)
+  let scheduledTasks = false
+  for (const agent of liveAgents) {
+    const activity = await ctx.waterfall(
+      'workspace/session-activity',
+      { sessionId: agent.id },
+      () => Promise.resolve([]),
+    )
+    if (Array.isArray(activity) && activity.some((entry) => entry?.kind === 'schedule')) {
+      scheduledTasks = true
+      break
+    }
+  }
+  return { activeTasks, scheduledTasks }
+}
+
 async function main() {
   claimStdout()
   const args = parseArgs(process.argv.slice(2))
@@ -287,6 +354,34 @@ async function main() {
   process.on('SIGTERM', () => { void stop() })
   process.on('SIGINT', () => { void stop() })
 
+  // The booted profile context: available once the Host finished starting, so a
+  // control request that arrives earlier is answered as "cannot inspect".
+  let context
+
+  /**
+   * Answers one control request with one `DSH_HOST_CONTROL` line.
+   *
+   * Unknown request types are ignored: a newer shell may ask something this
+   * launcher does not know, and a wrong answer is worse than no answer.
+   */
+  const answerControl = async (request) => {
+    if (request.type !== 'quit-inspection') return
+    const answer = { type: 'quit-inspection' }
+    try {
+      if (context === undefined) throw new Error('desktop quit: Host is not ready')
+      const inspection = await inspectQuit(context)
+      answer.activeTasks = inspection.activeTasks
+      answer.scheduledTasks = inspection.scheduledTasks
+    } catch (error) {
+      // An inspector that cannot answer counts as interruptible work, so the
+      // shell asks before quitting instead of quitting silently.
+      answer.activeTasks = true
+      answer.scheduledTasks = false
+      answer.error = error instanceof Error ? error.message : String(error)
+    }
+    await sendLine('DSH_HOST_CONTROL ' + JSON.stringify(answer))
+  }
+
   let buffer = ''
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', (chunk) => {
@@ -295,12 +390,27 @@ async function main() {
     while ((index = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, index).trim()
       buffer = buffer.slice(index + 1)
-      if (line === 'shutdown') void stop()
+      if (line === '') continue
+      if (line === 'shutdown') {
+        void stop()
+        continue
+      }
+      let request
+      try {
+        request = JSON.parse(line)
+      } catch {
+        warn('ignoring a control line that is neither `shutdown` nor JSON')
+        continue
+      }
+      if (request !== null && typeof request === 'object' && typeof request.type === 'string') {
+        void answerControl(request)
+      }
     }
   })
   process.stdin.on('end', () => { void stop() })
 
   const { ctx } = await application
+  context = ctx
   // Newer dsh releases expose `webServer.protocol` (with the colon); the
   // 0.2.0-rc line does not, and the server is plain http there.
   const protocol = ctx.webServer.protocol ?? 'http:'

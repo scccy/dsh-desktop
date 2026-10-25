@@ -59,12 +59,22 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager, State, Webview};
 use tauri_plugin_dialog::DialogExt;
 
+use tauri::ipc::{Channel, InvokeResponseBody};
+
 use crate::connection::{self, ErrorKind, ShellError};
 use crate::state::AppState;
 use crate::window::{CONTENT_WEBVIEW, MAIN_WINDOW, MIN_HEIGHT, MIN_WIDTH};
 
 /// The preload script, byte for byte (`node --check` covers its syntax).
 pub const BRIDGE_JS: &str = include_str!("../bridge/preload.js");
+
+/// The media/EventSource compatibility layer (synthetic MediaStream for the
+/// microphone, `EventSource` URL rewrite).
+///
+/// It runs *after* [`BRIDGE_JS`]: it reuses `__DSH_BRIDGE_ESCAPE__.appBase()`
+/// and `__TAURI_INTERNALS__` from the preload bridge, and it patches
+/// `navigator.mediaDevices` only once the bridge's `invoke` exists.
+pub const MEDIA_SHIM_JS: &str = include_str!("../bridge/media-shim.js");
 
 /// Scheme of Desktop-owned application documents.
 pub const APP_SCHEME: &str = "dsh-app";
@@ -1001,9 +1011,18 @@ pub fn desktop_device_info(
     Ok(read_device_info())
 }
 
+/// Serializes the native folder panel: a second concurrent request waits for the
+/// open panel instead of stacking another one (official `directory-picker.ts`
+/// keeps one pending promise per window).
+static DIRECTORY_PICK_LOCK: Mutex<()> = Mutex::new(());
+/// The path the last panel returned, so a waiting caller reuses that answer.
+static DIRECTORY_PICK_RESULT: Mutex<Option<Option<String>>> = Mutex::new(None);
+
 /// `__DSH_DIRECTORY_PICKER__.pick()`: native folder selection.
 ///
-/// Async so `blocking_pick_folder` runs off the main thread.
+/// Async so `blocking_pick_folder` runs off the main thread. macOS `NSOpenPanel`
+/// carries its own "new folder" button, so the official `createDirectory` option
+/// needs no equivalent.
 #[tauri::command]
 pub async fn desktop_directory_pick(
     app: AppHandle,
@@ -1011,11 +1030,86 @@ pub async fn desktop_directory_pick(
     bridge: State<'_, BridgeState>,
 ) -> Result<Option<String>, String> {
     assert_sender(&webview, &bridge)?;
-    Ok(app
-        .dialog()
-        .file()
-        .blocking_pick_folder()
-        .map(|path| path.to_string()))
+
+    // The official picker restores and focuses the window first: a panel owned
+    // by a minimized window would open where nobody can see it.
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+
+    match DIRECTORY_PICK_LOCK.try_lock() {
+        // First caller: show the panel and leave its answer for the waiters.
+        Ok(_guard) => {
+            let picked = app
+                .dialog()
+                .file()
+                .blocking_pick_folder()
+                .map(|path| path.to_string());
+            *DIRECTORY_PICK_RESULT
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(picked.clone());
+            Ok(picked)
+        }
+        // A panel is already open: wait for it and reuse the same answer.
+        Err(_) => {
+            let _guard = DIRECTORY_PICK_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let shared = DIRECTORY_PICK_RESULT
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone();
+            Ok(shared.flatten())
+        }
+    }
+}
+
+/// `__DSH_MEDIA__.status()` / `enumerateDevices()`: TCC authorization and inputs.
+///
+/// The platform choice happens inside `media::platform` (macOS → AVCapture,
+/// everything else → a fixed `unsupported`), matching the convention in
+/// `src-tauri/src/platform/`: no `cfg` in the command itself.
+#[tauri::command]
+pub fn desktop_microphone_status(
+    webview: Webview,
+    bridge: State<'_, BridgeState>,
+) -> Result<crate::media::permission::PermissionSnapshot, String> {
+    assert_sender(&webview, &bridge)?;
+    Ok(crate::media::platform::status())
+}
+
+/// `getUserMedia({audio})`: starts native capture and streams PCM over `channel`.
+///
+/// `options` arrives as a `Value` and is validated field by field — an invalid
+/// request must fail instead of silently recording at another sample rate.
+#[tauri::command]
+pub async fn desktop_microphone_start(
+    app: AppHandle,
+    webview: Webview,
+    bridge: State<'_, BridgeState>,
+    channel: Channel<InvokeResponseBody>,
+    options: Value,
+) -> Result<(), String> {
+    assert_sender(&webview, &bridge)?;
+    let options =
+        crate::media::MicOptions::parse(&options).map_err(|error| error.as_str().to_owned())?;
+    crate::media::platform::start(&app, options, channel)
+}
+
+/// `track.stop()` / `__DSH_MEDIA__.stop()`: ends capture and returns to idle.
+#[tauri::command]
+pub fn desktop_microphone_stop(
+    app: AppHandle,
+    webview: Webview,
+    bridge: State<'_, BridgeState>,
+) -> Result<(), String> {
+    assert_sender(&webview, &bridge)?;
+    crate::media::platform::stop(&app);
+    Ok(())
 }
 
 /// `dshDesktop.shortcuts.get(definitions)`.
@@ -1093,7 +1187,11 @@ pub fn desktop_updates_status(
     Ok(bridge.updates())
 }
 
-/// `dshDesktop.updates.open()`: run a release probe and publish the outcome.
+/// `dshDesktop.updates.open()`: the user asked to update (badge click).
+///
+/// Probes once, publishes the outcome, and — when a newer release exists — runs
+/// the same confirm/upgrade/restart flow the native menu uses. Without this the
+/// badge would be a dead end.
 #[tauri::command]
 pub fn desktop_updates_open(
     app: AppHandle,
@@ -1102,15 +1200,29 @@ pub fn desktop_updates_open(
 ) -> Result<(), String> {
     assert_sender(&webview, &bridge)?;
     let handle = app.clone();
-    std::thread::spawn(move || run_update_probe(&handle));
+    std::thread::spawn(move || {
+        if let Some((channel, _version)) = probe_and_publish(&handle)
+            && let Some(state) = handle.try_state::<std::sync::Arc<AppState>>()
+        {
+            crate::upgrade_and_restart(&handle, &state, &channel);
+        }
+    });
     Ok(())
 }
 
 /// Probes the registry for a newer `dsh` and publishes each transition.
-fn run_update_probe(app: &AppHandle) {
-    let Some(bridge) = app.try_state::<BridgeState>() else {
-        return;
-    };
+///
+/// Called once after the stack becomes ready, so the sidebar badge can show
+/// `available` before the user opens the menu.
+pub(crate) fn run_update_probe(app: &AppHandle) {
+    let _ = probe_and_publish(app);
+}
+
+/// One probe that publishes `checking` then the outcome.
+///
+/// @returns the dist-tag channel and version when a newer release exists.
+fn probe_and_publish(app: &AppHandle) -> Option<(String, String)> {
+    let bridge = app.try_state::<BridgeState>()?;
     bridge.publish_updates(app, DesktopUpdatePresentation::checking());
     let installed = app
         .try_state::<std::sync::Arc<AppState>>()
@@ -1119,13 +1231,22 @@ fn run_update_probe(app: &AppHandle) {
     let args = vec![
         "view".to_owned(),
         dsh_lite_core::update::PACKAGE.to_owned(),
-        "version".to_owned(),
+        "dist-tags".to_owned(),
+        "--json".to_owned(),
     ];
     log_info(app, "checking the published dsh release for the Web UI");
+    let mut newer: Option<(String, String)> = None;
     let presentation = match connection::helper_output(&program, &prefix, &args, UPDATE_TIMEOUT) {
         Ok((code, output)) => {
-            match dsh_lite_core::update::interpret(&output, code, installed.as_deref()) {
+            match dsh_lite_core::update::interpret_dist_tags(&output, code, installed.as_deref()) {
                 Ok(outcome) if outcome.newer => {
+                    newer = Some((
+                        outcome
+                            .channel
+                            .clone()
+                            .unwrap_or_else(|| "latest".to_owned()),
+                        outcome.latest.clone(),
+                    ));
                     DesktopUpdatePresentation::available(&outcome.latest)
                 }
                 Ok(_) => DesktopUpdatePresentation::idle(),
@@ -1141,6 +1262,7 @@ fn run_update_probe(app: &AppHandle) {
         }
     };
     bridge.publish_updates(app, presentation);
+    newer
 }
 
 /// `__DSH_LOCALE__.read()`.
@@ -1322,11 +1444,12 @@ pub fn desktop_platform_close(
 pub fn desktop_browser_acquire(
     webview: Webview,
     bridge: State<'_, BridgeState>,
+    guests: State<'_, crate::browser::BrowserState>,
     workspace: Value,
 ) -> Result<Value, String> {
-    assert_sender(&webview, &bridge)?;
-    let _ = workspace;
-    Err("dsh desktop: embedded browser guests are not implemented yet (P3)".to_owned())
+    // `browser::acquire` performs the same sender checks itself; doing it twice
+    // here would only duplicate the work.
+    crate::browser::acquire(&webview, &guests, &bridge.extra_origins(), &workspace)
 }
 
 /// `dshDesktop.browser.release(lease)`: P3.
@@ -1334,11 +1457,10 @@ pub fn desktop_browser_acquire(
 pub fn desktop_browser_release(
     webview: Webview,
     bridge: State<'_, BridgeState>,
+    guests: State<'_, crate::browser::BrowserState>,
     lease: String,
 ) -> Result<(), String> {
-    assert_sender(&webview, &bridge)?;
-    let _ = lease;
-    Err("dsh desktop: embedded browser guests are not implemented yet (P3)".to_owned())
+    crate::browser::release(&webview, &guests, &bridge.extra_origins(), &lease)
 }
 
 /// A short, credential-free description of a bounds payload.
@@ -1367,11 +1489,10 @@ fn summarize_bounds(bounds: &Value) -> String {
 pub fn bridge_script(origin: Option<&str>) -> String {
     match origin {
         Some(origin) => format!(
-            "globalThis.__DSH_BRIDGE_ORIGIN__ = {};\n{}",
+            "globalThis.__DSH_BRIDGE_ORIGIN__ = {};\n{BRIDGE_JS}\n{MEDIA_SHIM_JS}",
             serde_json::to_string(origin).unwrap_or_else(|_| "\"\"".to_owned()),
-            BRIDGE_JS
         ),
-        None => BRIDGE_JS.to_owned(),
+        None => format!("{BRIDGE_JS}\n{MEDIA_SHIM_JS}"),
     }
 }
 
@@ -1429,6 +1550,15 @@ macro_rules! bridge_handler {
             $crate::bridge::desktop_platform_close,
             $crate::bridge::desktop_browser_acquire,
             $crate::bridge::desktop_browser_release,
+            $crate::browser::commands::desktop_browser_guest_attach,
+            $crate::browser::commands::desktop_browser_guest_bounds,
+            $crate::browser::commands::desktop_browser_guest_navigate,
+            $crate::browser::commands::desktop_browser_guest_command,
+            $crate::browser::commands::desktop_browser_guest_state,
+            $crate::browser::commands::desktop_browser_guest_close,
+            $crate::bridge::desktop_microphone_status,
+            $crate::bridge::desktop_microphone_start,
+            $crate::bridge::desktop_microphone_stop,
         ]
     };
 }
@@ -1702,11 +1832,18 @@ mod tests {
     #[test]
     fn the_bridge_script_can_pin_the_document_origin() {
         let plain = bridge_script(None);
-        assert_eq!(plain, BRIDGE_JS);
+        // The media shim rides along after the preload bridge; its own tests
+        // live in `bridge/media-shim.test.cjs`.
+        assert!(plain.ends_with(MEDIA_SHIM_JS));
+        assert!(plain.contains("__DSH_MEDIA__"));
+        assert!(plain.starts_with(BRIDGE_JS));
         assert!(plain.contains("dshDesktopBoot"));
         let pinned = bridge_script(Some("dsh-app://app"));
         assert!(pinned.starts_with("globalThis.__DSH_BRIDGE_ORIGIN__ = \"dsh-app://app\";\n"));
-        assert!(pinned.ends_with(BRIDGE_JS));
+        // Order is load-bearing: caps (only when browser guests are on) must run
+        // before the preload bridge, the media shim after it.
+        assert!(pinned.ends_with(MEDIA_SHIM_JS));
+        assert!(pinned.contains(BRIDGE_JS));
     }
 
     #[test]

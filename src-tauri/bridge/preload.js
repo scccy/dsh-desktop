@@ -340,6 +340,25 @@
     function (error) { warn('could not read the shell platform', error) },
   )
 
+  // Native-feel scrolling. WKWebView rubber-bands the document by default, which
+  // makes a fixed desktop layout feel like a web page; Electron's
+  // `BrowserWindow` defaults to `scrollBounce: false`. The native flags are set
+  // in `platform::apply_window_chrome`; this rule covers scroll containers the
+  // native pass cannot reach.
+  whenDocumentRoot(function (root) {
+    var document = shellWindow.document
+    var install = function () {
+      if (document.getElementById('dsh-desktop-scroll') !== null) return
+      var style = document.createElement('style')
+      style.id = 'dsh-desktop-scroll'
+      style.textContent = 'html,body{overscroll-behavior:none}'
+      var head = document.head
+      ;(head === null || head === undefined ? root : head).appendChild(style)
+    }
+    if (document.head !== null && document.head !== undefined) install()
+    else document.addEventListener('DOMContentLoaded', install)
+  })
+
   listen(EVENT_WINDOW_FULLSCREEN, function (fullscreen) {
     whenDocumentRoot(function (root) {
       if (fullscreen === true) root.dataset.fullscreen = 'true'
@@ -653,27 +672,34 @@
   })
 
   // ---------------------------------------------------------------------------
-  // File drag: P3. Tauri exposes no drag-out controller yet, so the members
-  // answer with the values the Web UI sees while a preparation is unavailable.
-  // They never throw, and a missing answer simply means "no drag handle".
+  // File drag: a permanent difference, not a P3 TODO. Electron exposes
+  // `webContents.startDrag({ file, icon })`; Tauri v2 / wry has no equivalent
+  // (its `onDragDropEvent` only covers files dropped *into* the page), and the
+  // raw `WKWebView` drag source is private API. So these members answer with the
+  // values the Web UI sees while no native drag session exists: `prepare`
+  // resolves `undefined` ("no handle"), `start` resolves `false`, and the rest
+  // are no-ops. They never throw. dsh 0.2.1-rc.2 does not call them at all
+  // (verified: no consumer of `fileDrag` in the bundled packages).
   // ---------------------------------------------------------------------------
   var fileDragApi = Object.freeze({
-    /** @returns a promise for no handle (P3: no native drag session). */
+    /** @returns a promise for no handle (no native drag session exists). */
     prepare: function () { return Promise.resolve(undefined) },
-    /** No-op: nothing was prepared (P3). */
+    /** No-op: nothing was prepared. */
     cancel: function () {},
-    /** @returns a promise for "not started" (P3). */
+    /** @returns a promise for "not started". */
     start: function () { return Promise.resolve(false) },
-    /** No-op: nothing to release (P3). */
+    /** No-op: nothing to release. */
     release: function () {},
   })
 
   // ---------------------------------------------------------------------------
-  // Embedded browser guests: P3. The shape matches
+  // Embedded browser guests (`src-tauri/src/browser/`). The shape matches
   // `@deepseek-ai/dsh-client-ui-sidebar-browser`, but it is only attached when
-  // the shell sets `__DSH_BRIDGE_CAPS__.browserGuests`, because merely
-  // publishing `dshDesktop.browser` makes the Web UI drop its working
-  // iframe-based browser pane in favour of native guests.
+  // the shell sets `__DSH_BRIDGE_CAPS__.browserGuests` — i.e. when
+  // `[dsh] browserGuests = true`. Merely publishing `dshDesktop.browser` makes
+  // the Web UI drop its working iframe-based browser pane in favour of native
+  // guests, so the capability flag stays off until the guest path is verified on
+  // a real machine.
   // ---------------------------------------------------------------------------
   function createBrowserBridge() {
     var leases = {}
@@ -1112,6 +1138,16 @@
           var value = args[index]
           if (typeof value === 'string') {
             parts.push(value)
+          } else if (value instanceof Error) {
+            // `JSON.stringify(new Error('x'))` is `{}`: an error forwarded that
+            // way is useless in the rolling log, which is the only diagnostic a
+            // release build has.
+            parts.push(
+              String(value.name || 'Error') +
+                ': ' +
+                String(value.message || '') +
+                (value.stack ? '\n' + String(value.stack) : '')
+            )
           } else {
             try {
               parts.push(JSON.stringify(value))

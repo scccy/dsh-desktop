@@ -105,6 +105,13 @@ pub struct DshConfig {
     pub start_timeout_ms: u64,
     /// Extra arguments appended to the `dsh` command line.
     pub extra_args: Vec<String>,
+    /// Whether the embedded sidebar browser is offered to the Web UI.
+    ///
+    /// The Web UI switches from its own iframe pane to native guests as soon as
+    /// `window.dshDesktop.browser` exists, so this stays opt-in: a shell built
+    /// without a working guest path would otherwise take a working pane away
+    /// from the user. See `docs/desktop-parity.md` §6.4.
+    pub browser_guests: bool,
 }
 
 impl Default for DshConfig {
@@ -115,6 +122,7 @@ impl Default for DshConfig {
             web_fallback: false,
             start_timeout_ms: 120_000,
             extra_args: Vec::new(),
+            browser_guests: false,
         }
     }
 }
@@ -249,6 +257,7 @@ profile = "desktop"     # 展示用名称；三层桌面栈由 webFallback 决�
 webFallback = false     # true = 旧单层 dsh --profile web 路径
 startTimeoutMs = 120000
 extraArgs = []          # 追加到 dsh 命令行（高级）
+browserGuests = false   # true = 侧栏内嵌浏览器走原生 guest（需真机可用）
 
 [env]
 inherit = true
