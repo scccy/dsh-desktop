@@ -19,7 +19,7 @@
 | 三层桌面链路：`app_runtime` + `desktop_host` + `scheme` + `app_server` + `bridge` | 已实现并 macOS 真机验收（见 [desktop-parity §7.2](docs/desktop-parity.md)） |
 | macOS 两块头部（hiddenInset、无独立标题栏） | 已实现；vibrancy/红绿灯位置待精调（P3） |
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
-| `src-ui/` 标题栏 + 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
+| `src-ui/` 标题栏（仅 Windows/Linux）+ 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
 | Windows 安装包（Tauri bundler / NSIS） | 配置就位，未实测 |
 | 图标（`assets/`、`src-tauri/icons/`、`src-ui/icon.png`） | 已换成正式设计稿（`assets/icon.png` 为 1024 透明圆角源，`scripts/render-icons.ps1` 派生各平台尺寸） |
 | 三平台 CI（fmt / clippy / test / release 构建） | 已就位 |
@@ -27,7 +27,7 @@
 | macOS 真机验收 | 已做（三层链路 + 流式对话，2026-10-25） |
 | Linux 真机验收 | 未做 |
 
-窗口观感：macOS 用 `hiddenInset`（红绿灯叠在侧栏上、无独立标题栏，两块头部）；Windows / Linux 仍由壳自绘 40 DIP 标题栏（`header` webview）。渲染层 origin 与流量的拆分决策见 [ADR-006](docs/architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)，标题栏历史见 [ADR-005](docs/architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
+窗口观感：macOS 用 `hiddenInset`（红绿灯叠在侧栏上、无独立标题栏，两块头部）；Windows / Linux 仍由壳自绘 40 DIP 标题栏（`header` webview）。渲染层 origin 与流量的拆分决策见 [ADR-006](docs/architecture.md#adr-006-渲染层-origin-拆分)，标题栏历史见 [ADR-005](docs/architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
 
 ## 前置条件
 
@@ -164,7 +164,10 @@ docs/                     # 架构与开发文档
 ## 文档
 
 - [项目要求.md](项目要求.md) —— 目标与非目标、功能需求（FR-1..FR-11）、技术方案、平台差异矩阵、验收标准、里程碑
-- [docs/architecture.md](docs/architecture.md) —— 分层与双 webview 窗口模型、平台差异层、启动时序、错误分类、日志位置、关键决策（ADR-001..005，**当前有效的是 ADR-005**：单一 Tauri 壳 + 双 webview 标题栏）
+- [docs/architecture.md](docs/architecture.md) —— 三层分层、平台差异层、启动/退出时序、错误分类、日志、安全约束、关键决策（ADR-001..006，**当前有效的是 ADR-005 + ADR-006**：单一 Tauri 壳与渲染层 origin 拆分）
+- [docs/desktop-parity.md](docs/desktop-parity.md) —— 与官方 Desktop 的对齐目标、现状、阶段进展（P0–P2 已完成）与已知差异
+- [docs/bridge-contract.md](docs/bridge-contract.md) —— `window.dshDesktop` 桥的成员/命令/事件契约
+- [docs/spikes/wkwebview-scheme.md](docs/spikes/wkwebview-scheme.md) —— WKWebView 自定义 scheme 与 shim 的真机实证（ADR-006 依据）
 - [docs/development.md](docs/development.md) —— 环境准备、常用命令、调试、已知限制（GNU vs MSVC、Linux WebKitGTK 版本）
 - [CONTRIBUTING.md](CONTRIBUTING.md) —— 提交信息规范与必过检查
 

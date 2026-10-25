@@ -22,7 +22,9 @@
 2. **Desktop Host**（`dsh-desktop-host`，Node 子进程）：用 `runProfile({ profile: "desktop" })` 起 **desktop profile** 的 web host，通过 Node IPC 回报 `{ url, injections }`；
 3. **Renderer**（`dsh-app://app/`）：官方打包的 `dsh-web-frontend/dist` + preload 桥（`window.dshDesktop` 等），前端 boot 用 `dshDesktopBoot.ready()` 拿 `injections`/`streamBaseUrl` 后再启动。
 
-我们现在的 `dsh-desktop` 是**两层**：Tauri 裸窗口 + content webview 直接加载 `dsh --profile web` 的 http URL；没有 `dsh-app://`、没有 Host 子进程、没有 preload 桥、profile 是 `web`、运行时依赖机器上全局安装的 `dsh`。
+改造前（P0 之前）的 `dsh-desktop` 是**两层**：Tauri 裸窗口 + content webview 直接加载 `dsh --profile web` 的 http URL；没有 `dsh-app://`、没有 Host 子进程、没有 preload 桥、profile 是 `web`、运行时依赖机器上全局安装的 `dsh`。
+
+P1 / P2 落地后默认为三层（见 §7.2）；`--url` / `--port` / `webFallback = true` 时仍走旧两层路径，用于附着到已在运行的实例。
 
 **本阶段目标**：把上面三层按官方参考实现补齐（**用 Rust/Tauri 移植**）；**运行时继续复用机器全局的 dsh/node，但按官方方式做好环境注入**（登录 shell 探针 + 启动注入），**不内置 Python/Node/dsh/pnpm**（避免包体过大与重复建设）；非功能目标是**更小内存、更小安装包**。
 
@@ -77,16 +79,16 @@
 
 ## 4. 现状 vs 目标
 
-| 维度 | 现状（本仓库） | 目标（对齐官方） |
-|---|---|---|
-| 分层 | Tauri 壳 + content http 页面 | Main + Host + Renderer 三层 |
-| 文档来源 | 直接加载 `dsh web` http URL | `dsh-app://` 静态 dist + 代理到 Host |
-| 认证 | webview 自带 cookie jar（`shell_server` 同源） | Main 换 cookie 并注入 HTTP/WS（官方方式） |
-| preload 桥 | 无（少量 `invoke`） | `window.dshDesktop` 全套 + boot/injections 契约 |
-| Host | 无；`dsh --profile web` | `dsh-desktop-host` 子进程 + desktop profile |
-| profile | `web` | `desktop`（桌面端独占） |
-| 运行时 | 机器全局 `dsh`（登录 shell 探针） | **仍是机器全局 `dsh`**；补官方式环境注入；**不内置运行时**（有意差异） |
-| macOS 窗口 | 原生标题栏（三块） | `hiddenInset` + vibrancy（两块） |
+| 维度 | 改造前（P0 之前） | 现状（P1/P2 之后） | 目标（对齐官方） |
+|---|---|---|---|
+| 分层 | Tauri 壳 + content http 页面 | **三层**：壳 + Desktop Host + Renderer | Main + Host + Renderer 三层 |
+| 文档来源 | 直接加载 `dsh web` http URL | `dsh-app://app/` 静态 dist + 模块脚本；动态流量走回环代理 | `dsh-app://` 静态 dist + 代理到 Host |
+| 认证 | webview cookie jar（`shell_server` 同源） | **Rust 持 cookie**，HTTP/WS 代理注入；webview 收不到 Set-Cookie | Main 换 cookie 并注入 HTTP/WS |
+| preload 桥 | 无 | `window.dshDesktop` 全套 + `dshDesktopBoot` + `data-platform` + fetch/XHR 重写 | 同左 |
+| Host | 无 | `desktop-host.mjs` + `runProfile({profile:"desktop"})` | `dsh-desktop-host` 子进程 + desktop profile |
+| profile | `web` | `desktop`（`$DSH_HOME/profiles/desktop`）；`webFallback` 显式退回 | `desktop`（桌面端独占） |
+| 运行时 | 机器全局 `dsh`（登录 shell 探针） | **仍是机器全局 `dsh`** + 官方式环境注入 | 官方内置；我们有意不内置 |
+| macOS 窗口 | 原生标题栏（三块） | `hiddenInset`（两块），vibrancy/红绿灯位置待精调 | `hiddenInset` + vibrancy（两块） |
 
 ## 5. 目标架构
 
@@ -149,6 +151,7 @@
 
 - Tauri 只能 `invoke`（异步）+ 事件；官方 preload 有同步 getter（如 `getAuthToken`）。
 - 影响：`window.dshDesktop` 的成员需逐个确认是否可异步化；不可异步的用 init script 缓存值规避。
+- **落地结论**：桥成员全部是异步方法；唯一的同步成员 `__DSH_HOST_PATHS__.pathFor` 在 Tauri 没有 `webUtils` 等价物，恒返回 `''`（拖入/粘贴的文件走上传，而不是 `@path` 引用）。动态 HTTP 由 init script 里的 `fetch` / `XMLHttpRequest` 重写到回环 origin，因此不需要任何同步 getter。
 
 ### 6.6 运行时来源（不内置）
 
@@ -178,13 +181,13 @@
 
 ## 7. 分阶段计划与验收
 
-| 阶段 | 内容 | 验收 |
-|---|---|---|
-| **P0 Host 启动器** | Node 启动器调 `runProfile({profile:"desktop"})`，补配置注入；登录 shell 探针注入环境；`dsh --version` 校验；stdout 回报 `url`+`injections` | 终端能起 Host 并打印可用 url；`curl` 能拿到前端 index；GUI 启动能拿到 shell 导出变量 |
-| **P1 `dsh-app://` + 代理** | 注册 scheme，静态 dist 从安装读取，HTTP 代理到 Host；WS 用 Rust 代理（主进程持 cookie 注入） | 主窗口从 `dsh-app://app/` 加载，登录、对话、流式回复可用 |
-| **P2 preload 桥** | init script 实现 `dshDesktop`（先 keyboard/shortcuts/deviceInfo）+ `dshDesktopBoot` + `data-platform` | 客户端不再报 `Desktop keyboard bridge unavailable`；快捷键可用；两块头部出现 |
-| **P3 原生能力** | 目录选择、文件拖放、麦克风、更新、深链 `dsh://open`、托盘、退出确认、内嵌浏览器（子 webview） | 每项一个手工验收用例 |
-| **P4 收尾** | 独占 `profiles/desktop`、错误页/版本提示、文档与 ADR 回填 | 全局 dsh 版本不足/缺失时有明确错误页；架构文档更新 |
+| 阶段 | 状态 | 内容 | 验收 |
+|---|---|---|---|
+| **P0 Host 启动器** | ✅ 完成 | Node 启动器调 `runProfile({profile:"desktop"})`，补配置注入；登录 shell 探针注入环境；`dsh --version` 校验；stdout 回报 `url`+`injections` | 终端能起 Host 并打印可用 url；`curl` 能拿到前端 index；GUI 启动能拿到 shell 导出变量 |
+| **P1 `dsh-app://` + 代理** | ✅ 完成 | 注册 scheme，静态 dist 从安装读取，HTTP 代理到 Host；WS 用 Rust 代理（主进程持 cookie 注入） | 主窗口从 `dsh-app://app/` 加载，登录、对话、流式回复可用 |
+| **P2 preload 桥** | ✅ 完成 | init script 实现 `dshDesktop`（先 keyboard/shortcuts/deviceInfo）+ `dshDesktopBoot` + `data-platform` | 客户端不再报 `Desktop keyboard bridge unavailable`；快捷键可用；两块头部出现 |
+| **P3 原生能力** | ⬜ 未开始 | 目录选择、文件拖放、麦克风、更新、深链 `dsh://open`、托盘、退出确认、内嵌浏览器（子 webview） | 每项一个手工验收用例 |
+| **P4 收尾** | 🟡 部分 | 独占 `profiles/desktop`、错误页/版本提示、文档与 ADR 回填 | 全局 dsh 版本不足/缺失时有明确错误页；架构文档更新 |
 
 ### 7.1 P0 进展（已验证）
 
@@ -214,7 +217,7 @@
 | 代理（WS） | 通过 | `websocket /api/remote.mux -> 101 (host upgraded)` |
 | 对话 + 流式 | 通过 | 页面发消息 → `POST /api/session/prompt 200` → 2 秒后页面实时渲染回复，用量 10.3k tok |
 
-**架构决策**：见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)。
+**架构决策**：见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分)。
 `dsh-app://` 只承载文档、静态资源与模块脚本；`fetch` / `XMLHttpRequest` / `EventSource` / WebSocket 全部走回环 app server（Rust 注入 cookie、CORS 白名单回显）。决策依据是真机 spike：
 [docs/spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md)（scheme 响应无法流式、自定义 scheme 是 secure context 但 WKWebView 不实现 Media Capture）。
 
@@ -244,10 +247,15 @@
 
 ## 9. 已知差异（接受并记录）
 
-- 内嵌浏览器用「子 webview + `<webview>` 兼容层」实现，能力与 Electron `<webview>` 可能有细节差异；
-- **运行时**：官方内置 Python/Node/dsh/pnpm；我们复用机器全局 `dsh`（有意差异，避免包体与重复建设），因此「干净机器无 dsh」时需先安装（项目既有前置条件）；
-- WS 认证在 Tauri 上用 Rust 代理实现（Electron 是 `onBeforeSendHeaders`），行为一致、机制不同；
-- 非 macOS 平台的标题栏/外观按官方 Windows 方案对齐，但 Tauri 与 Electron 的控件细节会有差异；
+- **渲染层 origin 拆分**：官方用一个流式 `protocol.handle('dsh-app')` 同时出文档与代理；我们在 WKWebView 上拆成「scheme 出文档/模块脚本 + 回环 app server 跑动态流量」（ADR-006）。行为一致，机制不同；shim 覆盖面（`fetch` / `XMLHttpRequest`）之外的请求（`EventSource`、worker 内 fetch、`sendBeacon`）需要时再补。
+- **scheme 响应被缓冲**：`dsh-app://` 只承载静态与模块脚本，Host GET 缓冲上限 32 MiB；大文件/流式必须走回环 origin。
+- **`fetch(new Request(...))` 带 body 会进内存**：WKWebView 不支持 ReadableStream 上传，桥会 `clone()` + `arrayBuffer()` 重建请求；大文件上传走 XHR（真流式）。
+- **EventSource 不重写**：只有 hmr / documentpreview 使用，且需要绝对回环 URL；未在 P1 验收范围内。
+- **麦克风需原生采集**：WKWebView 不实现 Media Capture（`navigator.mediaDevices === undefined`），P3 要用 AVCaptureSession 采集后喂页面。
+- **`__DSH_HOST_PATHS__` 恒空**：Tauri 无 `webUtils.getPathForFile` 等价物，拖入/粘贴文件按上传处理。
+- **运行时**：官方内置 Python/Node/dsh/pnpm；我们复用机器全局 `dsh`（有意差异，避免包体与重复建设），因此「干净机器无 dsh」时需先安装（项目既有前置条件）。
+- WS 认证在 Tauri 上用 Rust 代理实现（Electron 是 `onBeforeSendHeaders`），行为一致、机制不同。
+- 非 macOS 平台的标题栏/外观按官方 Windows 方案对齐，但 Tauri 与 Electron 的控件细节会有差异；Windows 上自定义 scheme 的 origin 是 `http://dsh-app.localhost`，CORS 白名单与 `data-platform` 待复验。
 - 更新通道/签名流程按我们自己的发布体系，不复刻官方 updater。
 
 ## 10. 参考（官方源码）
@@ -261,3 +269,16 @@
 - `src/ipc.ts`（`DESKTOP_IPC` 契约）
 - `dsh-desktop-host`（私有包，随官方 app.asar 分发，不在 npm）
 - `@deepseek-ai/dsh/profile-boot`（`runProfile`，全局 dsh 可解析）
+
+### 10.1 本仓库实现（P1/P2）
+
+| 官方文件 / 能力 | 本仓库 |
+|---|---|
+| `src/main.ts`（窗口、scheme、代理、IPC） | `src-tauri/src/main.rs`、`window.rs`、`scheme.rs` |
+| `src/web-document.ts` | `crates/dsh-lite-core/src/app_server/{document,proxy,auth}.rs` |
+| `src/host-process.ts` | `src-tauri/host/desktop-host.mjs`、`crates/dsh-lite-core/src/desktop_host.rs` |
+| `src/preload-app.ts` / `preload-platform.ts` | `src-tauri/src/bridge.rs`、`src-tauri/bridge/preload.js` |
+| `src/ipc.ts` | `bridge.rs` 的命令与事件常量；契约见 [bridge-contract.md](bridge-contract.md) |
+| `dsh-desktop-host` | `app_runtime.rs`（编排）+ `desktop-host.mjs` |
+| `runProfile` / 前端 dist | `dsh-lite-core/src/frontend_dist.rs`、`version_gate.rs` |
+| 真机证据 | [spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md) |

@@ -1,5 +1,8 @@
 # Spike：WKWebView 自定义 scheme（`dsh-app://app`）能力实证
 
+
+> **状态（2026-10-25）**：本 spike 的结论已采纳为 [ADR-006](../architecture.md#adr-006-渲染层-origin-拆分) 并落地到 P1/P2（`scheme.rs` + `app_server` + `bridge/preload.js` shim）。本文保留为原始证据。
+
 > 目的：决定 `docs/desktop-parity.md` §6.1/§6.2 里 P1 架构的走向 —— 主窗口页面到底从
 > `dsh-app://app` 加载（复刻 Electron 的 `protocol.handle`），还是退回回环
 > `http://127.0.0.1`。官方的做法是把 `dsh-app://app/` 做成**流式代理**（转发请求体、返回
@@ -32,11 +35,11 @@ SPIKE_MODE=shim cargo run -p dsh-desktop --example scheme_spike
 
 产物：
 
-- 程序：[scheme_spike.rs](src-tauri/examples/scheme_spike.rs)、[scheme_spike_page.html](src-tauri/examples/scheme_spike_page.html)
+- 程序：[scheme_spike.rs](../../src-tauri/examples/scheme_spike.rs)、[scheme_spike_page.html](../../src-tauri/examples/scheme_spike_page.html)
 - 异步结果：`/tmp/dsh-desktop/scheme-spike.json`（71,506 B，单轮约 11.2 s 跑完 15 个探测）
 - 同步结果：`/tmp/dsh-desktop/scheme-spike-sync.json`（84,411 B）
 - shim 结果：`/tmp/dsh-desktop/shim-e2e.json`（64,726 B，10 个探测）
-- shim 原型与页面：[shim_init.js](src-tauri/examples/shim_init.js)（作为 Tauri `initialization_script` 注入）、[shim_spike_page.html](src-tauri/examples/shim_spike_page.html)
+- shim 原型与页面：[shim_init.js](../../src-tauri/examples/shim_init.js)（作为 Tauri `initialization_script` 注入）、[shim_spike_page.html](../../src-tauri/examples/shim_spike_page.html)
 
 页面里所有探测都带 try/catch，失败也记录错误原文；结果回传走 `dsh-app://app/__report/<i>/<n>/<b64url>`
 （同源，不受 CORS 影响），回环 `POST /report` 只作为 CORS 证据（它自己也过了 preflight）。

@@ -5,42 +5,49 @@
 ## 1. 分层
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│ src-ui/            零构建 HTML/CSS/JS                        │
-│   header.html                                               │  40 DIP 标题栏（壳自己的 chrome）
-│   loading / error / settings                                │  三屏
-├──────────────────────────────────────────────────────────────┤
-│ src-tauri/         Rust + Tauri v2                           │
-│   main / connection / lifecycle / window /                   │
-│   tray / menu / menubar / shortcuts / state                  │
-│   platform/        唯一的平台差异层                          │
-├──────────────────────────────────────────────────────────────┤
-│ crates/dsh-lite-core/   纯 Rust，无 GUI 依赖                 │
-│   config / cli / dsh_locate / env_probe /                    │
-│   launcher / url_policy / logging / update / job             │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────── Tauri App (Rust) ────────────────────────────┐
+│ src-tauri/                                                               │
+│   main / app_runtime / scheme / bridge / connection(旧路径) /            │
+│   lifecycle / window / tray / menu / shortcuts / state                   │
+│   platform/        唯一的平台差异层                                       │
+├──────────────────────────────────────────────────────────────────────────┤
+│ crates/dsh-lite-core/   纯 Rust，无 GUI 依赖                              │
+│   config / cli / dsh_locate / env_probe / desktop_host / version_gate /   │
+│   frontend_dist / app_server（静态 + 流式 HTTP + WS + CORS）/             │
+│   launcher / url_policy / logging / update / job                         │
+└──────────────────────────────────────────────────────────────────────────┘
+        │ 启动 / IPC                          ▲ initialization_script（桥）
+        ▼                                     │
+┌──────────────────────────┐      ┌──────────────────────────────────────┐
+│ Desktop Host 子进程       │      │ Renderer: dsh-app://app/              │
+│ Node · 全局 dsh           │◄────►│  官方前端 dist（全局安装内读取）        │
+│ runProfile(desktop)       │ HTTP │  window.dshDesktop / boot 桥          │
+│ 回报 url + injections     │  WS  │  data-platform=darwin                 │
+└──────────────────────────┘      └──────────────────────────────────────┘
 ```
 
-一个窗口里有两个 webview：`header`（40 DIP，画壳自己的标题栏）和 `content`（其余部分，装三屏或 `dsh web`）。窗口本身不带 webview，用 `tauri::window::WindowBuilder` 建裸窗口，再用 `Window::add_child` 挂两个子 webview，因此两者可以各自导航而互不影响。`add_child` 属于 Tauri 的 `unstable` feature，已在 `src-tauri/Cargo.toml` 里显式打开；升级 Tauri 时要先确认该 API 仍然存在。
+默认启动是**三层**的：Rust 壳（窗口、`dsh-app` scheme、回环代理、preload 桥）→ Desktop Host 子进程（desktop profile）→ Renderer（`dsh-app://app/`，读全局安装里的 `dsh-web-frontend/dist`）。渲染层 origin 与动态流量的拆分见 [ADR-006](#adr-006-渲染层-origin-拆分)。`--url` / `--port` 或 `webFallback = true` 时退回旧的两层路径（壳直接加载一个已在运行的 `dsh web`）。
 
-为什么不是「一个 webview 里切换页面」：标题栏必须常驻在 `dsh` 页面之上，而单元 webview 只能整页导航，要么靠注入浮层（ADR-004 已否决），要么让标题栏随页面一起消失。拆成两个 webview 是唯一不碰 `dsh` 页面的做法。
+窗口结构：窗口本身不带 webview（`tauri::window::WindowBuilder` 建裸窗口），`content` 子 webview 承载渲染层。Windows / Linux 额外挂一个 40 DIP 的 `header` 子 webview 画标题栏；macOS 用 `hiddenInset`（`title_bar_style(Overlay)` + `hidden_title(true)` + 透明窗口），红绿灯叠在页面上，窗口读作「侧栏 + 内容」两块。`add_child` 属于 Tauri 的 `unstable` feature，升级时要先确认 API 仍在。
 
-
-依赖方向严格单向：`src-tauri` 依赖 `dsh-lite-core`，反之不成立。`dsh-lite-core` 不得 `use tauri::*`、不得创建窗口、不得读全局环境变量（环境探针的输入由调用方传入），因此定位规则、`dsh web:` 行解析、token 脱敏、环境差分合并、退出码分类都能在无显示器的 CI 上单测。
+依赖方向严格单向：`src-tauri` 依赖 `dsh-lite-core`，反之不成立。`dsh-lite-core` 不得 `use tauri::*`、不得创建窗口；定位、Host 启动器、代理、WS、静态文档、版本闸门等全部可在无显示器 CI 上单测。
 
 | 模块 | 职责 | 不负责 |
 |---|---|---|
 | `config` | 配置默认值、TOML 解析、字段校验、平台配置目录 | 命令行覆盖（在 `cli`） |
 | `cli` | 参数解析与 `--help` 文本 | 与应用其余部分交互 |
-| `dsh_locate` | 按 FR-1 顺序定位可执行文件、`--version` 探测、profile 预检 | 启动进程 |
+| `dsh_locate` | 按 FR-1 顺序定位可执行文件（含 `@deepseek-ai/dsh` 包目录） | 启动进程 |
+| `desktop_host` | Host 子进程：spawn、`DSH_HOST_READY/FATAL` 解析、优雅停止、进程组回收 | 代理与窗口 |
+| `version_gate` | `dsh --version` 语义化比较（含 prerelease）、最低版本拒绝 | 启动 |
+| `frontend_dist` | 从全局安装解析 `dsh-web-frontend/dist`，校验 index | 提供文件 |
+| `app_server` | 回环 origin：静态 dist、流式 HTTP 代理、WS 代理、CORS/preflight、token→cookie 认证 | 窗口与 GUI |
 | `env_probe` | macOS/Linux 登录 shell 环境读取与合并规则 | Windows 环境（直接继承） |
-| `launcher` | 子进程生命周期、stdout 匹配 `dsh web:` 行、超时与退出码分类 | URL 语义（在 `url_policy`） |
+| `launcher` | 旧路径：`dsh web` 子进程与 `dsh web:` 行解析 | 三层栈（在 `desktop_host`） |
 | `url_policy` | token 提取与脱敏、同源判断、最终 URL 校验 | 网络请求 |
-| `logging` | 滚动日志、崩溃报告、脱敏写出 | 决定记什么（由调用方传入） |
+| `logging` | 滚动日志、崩溃报告、脱敏写出 | 决定记什么 |
+| `update` / `job` | npm 版本探测 / 进程树回收 | UI |
 
-`src-tauri` 只做平台粘合：把上面这些纯函数接到窗口、托盘、菜单和进程退出路径上。
-
-**落地状态**：`config`、`cli`、`dsh_locate`、`env_probe`、`launcher`、`url_policy`、`logging` 均已实现并各有单测；`src-tauri` 已按上面的模块划分落地并包含 `platform/` 层；`src-ui/` 已有加载页、错误页、设置页。尚未发布，也未在装有真实 `dsh` 的机器上完成验收。
+**落地状态**：三层链路已在 macOS 真机端到端跑通（见 [desktop-parity §7.2](desktop-parity.md#72-p1--p2-进展2026-10-25-真机验收)）；`cargo test --workspace` 281 passed；clippy/fmt 干净；release 二进制 6.9 MB。Windows/Linux 尚未复验新架构。
 
 ### 1.1 平台差异层
 
@@ -63,55 +70,55 @@ src-tauri/src/platform/
 
 ## 2. 启动时序
 
-托管模式（默认）的单次启动：
+默认（三层，`webFallback = false`）：
 
 ```text
-1  解析 CLI 参数（--url / --port / --dsh-path / --profile / --no-env-probe / --verbose）
-2  加载配置：以平台配置目录的 config.toml 为底，CLI 覆盖其上；首次启动写默认文件（不覆盖已有文件）
-3  获取单实例锁（Windows 命名 Mutex / Unix 文件锁，锁文件在应用数据目录）
-      └─ 已持有锁：把已有窗口显示并聚焦；带 --url 时用新 URL 重载，然后本次进程退出
-4  定位 dsh（--dsh-path → 配置 dsh.path → DSH_LITE_DSH_PATH → PATH → 常见安装位置）
-5  Profile 预检：自定义 profile 先跑 `dsh --profile <name> --dump-config`；缺失则进错误页
-6  环境准备：macOS/Linux 运行登录 shell `-ilc 'env -0'` 并合并（超时 → 依次回退 zsh / bash / sh → 最后退回继承环境）；Windows 直接继承
-7  spawn：`dsh --profile <profile> --no-open --host 127.0.0.1 --port <0 或配置值>`，stdout/stderr 接入日志
-8  就绪：匹配 stdout 的 `^dsh web:\s*(\S+)$` 取 URL；超时（默认 120s）报错并附最后 64 KiB stderr
-9  首跳：把 token URL 载入 WebView 一次；服务端种签名 cookie 后 302 到干净 URL
-10 校验：确认窗口最终 URL 已不含 token 参数，否则按认证失败处理
-11 稳定运行：记忆窗口尺寸/位置/最大化，外链走系统浏览器
+1  解析 CLI：--url / --port / --dsh-path / --profile / --no-env-probe / --verbose
+2  加载 config.toml（首次启动写默认文件，不覆盖已有文件）
+3  单实例：已有实例则显示并聚焦；带 --url 时交给旧路径重载
+4  建窗口与 content webview，先显示 dsh-app://shell/loading.html
+5  定位全局 dsh（--dsh-path → config.dsh.path → DSH_LITE_DSH_PATH → PATH → 常见安装位置）
+6  dsh --version 版本闸门（< 0.2.1-rc.2 拒绝并给升级命令）
+7  解析渲染层 dist：<dsh包>/node_modules/@deepseek-ai/dsh-web-frontend/dist
+8  登录 shell 环境探针（macOS/Linux `<shell> -ilc 'env -0'`；Windows 继承）
+9  起 Desktop Host：node host/desktop-host.mjs --dsh <pkg> --project $DSH_HOME/profiles/desktop
+      ├─ 等 DSH_HOST_READY { url, origin, protocol, protocolVersion, injections }
+      └─ DSH_HOST_FATAL 带 code=version/profile → 对应错误页
+10 GET 一次性 token URL → 303 + set-cookie，cookie 只留在 Rust 内存
+11 起回环 app server（127.0.0.1:0）：静态 dist + 流式 HTTP 代理 + WS 代理 + CORS
+12 桥交付 boot payload（injections + streamBaseUrl），窗口导航到 dsh-app://app/
+13 Renderer：module bundle 从 scheme 读，插件脚本/API/WS 全部走回环 origin
 ```
 
-子进程的生命周期由两层保障，且**不依赖退出钩子**：正常路径走 `dsh_stop`／`stop()`（先请求退出、超时强杀），异常路径（壳被强杀、崩溃、调试器停止）由 Windows Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）兜底 —— 句柄随子进程句柄存活，本进程一死就关闭，整棵进程树被系统回收。实现位于 `crates/dsh-lite-core`，两个壳共用。
+旧路径（`--url` / `--port` / `webFallback = true`）：定位 dsh → profile 预检 → 起 `dsh --profile <name>` → 匹配 stdout `dsh web: <url>` → 导航 token URL → 校验 URL 已脱 token。这条路径**不注入桥**。
+
+子进程生命周期由两层保障，且不依赖退出钩子：正常路径 `stop()`（先请求退出、超时强杀），异常路径由 Windows Job Object / Unix 进程组兜底 — 本进程一死，整棵进程树被回收。
 
 退出时序（顺序不可交换）：
 
 ```text
 a  触发（关闭窗口且 closeAction = quit / 托盘退出 / Cmd+Q）
-b  停止托管中的子进程：先请求正常退出 → 超时后强杀整个进程组（Windows 用 Job Object 绑定，避免孤儿）
-c  附着模式（--url / --port）跳过 b：壳不拥有这些进程
-d  刷写日志、释放单实例锁、退出
+b  停止 Host：stdin "shutdown" → 超时强杀整个进程组
+c  停止 app server（关闭监听并断开连接）
+d  旧路径的子进程同样在 b/c 停止（附着模式跳过：壳不拥有那些进程）
+e  刷写日志、释放单实例锁、退出
 ```
 
-`closeAction = hide` 时（macOS 默认，Windows/Linux 可选）只隐藏窗口，子进程与托盘/ Dock 图标保留。
+`closeAction = hide` 时（macOS 默认，Windows/Linux 可选）只隐藏窗口，Host、app server 与托盘/Dock 图标保留。
 
 ## 3. 错误分类
 
-所有面向用户的失败都进入**原生错误页**（不是白屏、不是静默退出），原文展示底层报错，给出可执行动作；同时写入日志。
+所有面向用户的失败都进入**错误页**（`dsh-app://shell/error.html` 或旧路径的壳错误页），原文展示底层报错，给出可执行动作；同时写日志。
 
-| 类别 | 触发点 | 错误页动作 | 日志来源标记 |
+| `ErrorKind` | 页面 `kind=` | 触发点 | 错误页动作 |
 |---|---|---|---|
-| `dsh-not-found` | 第 4 步全部候选都失败 | 显示安装命令、打开设置 | `startup` |
-| `dsh-version-unsupported` | `dsh --version` 不满足 `engines` | 显示升级命令 | `startup` |
-| `profile-missing` | 第 5 步预检失败 | 改用 `web` profile、复制创建命令 | `startup` |
-| `env-probe-failed` | 第 6 步所有 shell 都失败 | 降级继续（继承环境）并在页面提示 | `startup` |
-| `spawn-failed` | 第 7 步无法创建进程（权限、路径、`CREATE_NO_WINDOW` 失败） | 显示路径与原因、打开日志目录 | `startup` |
-| `ready-timeout` | 第 8 步 120s 内没有 `dsh web:` 行 | 附最后 64 KiB stderr、打开日志目录 | `startup` |
-| `port-in-use` | 显式 `--port` 时端口已被占用 | 改用 OS 分配端口 | `startup` |
-| `auth-failed` | 第 10 步仍在 token URL 或没有跳转 | 显示重新认证动作 | `renderer` |
-| `child-exited` | 子进程异常退出 | 显示退出码与原因，自动重启不超过 3 次 | `startup` |
-| `attach-unreachable` | `--url` / `--port` 目标不可达 | 提示从运行 dsh 的终端复制完整 URL | `renderer` |
-| `internal` | 未分类的壳自身错误 | 显示崩溃报告路径 | `shell` |
+| `DshNotFound` | `dsh-not-found` | 定位失败 / `@deepseek-ai/dsh` 包目录不可解析 | 显示安装命令、打开设置 |
+| `Version` | `version` | `dsh --version` 低于 0.2.1-rc.2（预检或 Host `FATAL code=version`） | 显示升级命令 |
+| `Profile` | `profile` | profile 目录不可用、Host `FATAL code=profile`、缺 `dsh-web-frontend` | 创建 profile 提示、升级 dsh |
+| `Ready` | `ready` | Host 超时/退出/其它 `FATAL`、app server 起不来、页面 boot 失败 | 附 stderr 尾部、打开日志目录 |
+| `Auth` | `auth` | token URL 非 303 / 无 set-cookie / 旧路径 URL 仍带 token | 重试连接 |
 
-崩溃报告文件名 `crash-<UTC 时间>-<来源>.log`，来源取上表最后一列，保留最近 10 份。
+崩溃报告文件名 `crash-<UTC 时间>-<来源>.log`，来源取 `startup` / `renderer` / `shell`，保留最近 10 份。
 
 ## 4. 日志位置
 
@@ -131,14 +138,17 @@ d  刷写日志、释放单实例锁、退出
 
 | 约束 | 实现位置 |
 |---|---|
-| 只允许当前连接同源的 `http://127.0.0.1` / `http://[::1]` 导航，其余外跳系统浏览器 | `url_policy` 判定 + `src-tauri/window.rs` 导航回调 |
-| release 构建关闭 WebView 远程调试，不向页面注入 JS | `src-tauri`（构建配置 + 无 `eval` 注入） |
-| token 只存在于内存与首次请求 | `url_policy` + 日志脱敏 |
-| 不读不缓存不上传任何凭据（`DEEPSEEK_API_KEY` 由子进程自己读环境） | `env_probe` 只关心变量名集合，壳不落盘任何值 |
+| 渲染层只允许 `dsh-app://app`、`dsh-app://shell` 与本窗口；其它外跳系统浏览器 | `window::classify_navigation` + `main.rs::handle_navigation` |
+| Host cookie 只在 Rust 内存；webview 永远收不到 `Set-Cookie`（响应头被扣留，`dsh-app` 页面的 cookie jar 本身也被 WKWebView 丢弃） | `app_server::proxy` / `scheme` 的 `WITHHELD_RESPONSE_HEADERS` |
+| 动态请求的跨源白名单只有 `dsh-app://app`、`dsh-app://localhost`、`http://dsh-app.localhost` 与本 server origin；其它 Origin 403 | `app_server::AppState::is_allowed_origin` + preflight |
+| 桥只在应用文档生效：命令校验 webview 标签 + 文档 origin（主 frame），其它来源拒绝 | `bridge::assert_sender` |
+| release 构建关闭 WebView 远程调试；调试构建的 `DSH_DEBUG_EVAL` 必须显式设环境变量才启用 | `cfg(debug_assertions)` + 环境变量 |
+| token 只存在于一次性认证请求；日志/错误页/崩溃报告都经脱敏 | `url_policy::redact_*`，`authenticate_host` 不返回 URL |
+| 不读不缓存不上传任何凭据 | `env_probe` 只记变量名与来源，壳不落盘任何值 |
 
 ## 6. 关键决策（ADR）
 
-以下按时间顺序记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果。**当前有效的是 ADR-005**；ADR-001 / 003 / 004 保留原文，只在标题上标注状态，用来解释「为什么当初那样选」，不要拿它们当现状。
+以下按时间顺序记录决策本身、背景、被否掉的替代方案与代价，以及由此产生的后果。**当前有效的是 ADR-005 与 ADR-006**；ADR-001 / 003 / 004 保留原文，只在标题上标注状态，用来解释「为什么当初那样选」，不要拿它们当现状。
 
 ### ADR-001 窗口装饰使用系统原生标题栏（已被 ADR-005 取代）
 
@@ -161,9 +171,9 @@ d  刷写日志、释放单实例锁、退出
 - 三平台窗口行为（拖拽、贴边、最大化、系统菜单）完全交给操作系统，壳不拦截、不复刻；
 - 若将来必须自绘，先改本 ADR 并说明如何绕开 §5 的注入限制，再动代码。
 
-> **2026-10-21 状态变更**：Windows 原生壳已改为**自绘标题栏行**（见 [ADR-004](#adr-004-windows-原生壳自绘标题栏行内容属于壳)）。本条的否决前提之一是"Tauri 没有等价开关"，该前提只对 `src-tauri` 成立；WinUI 有 `ExtendsContentIntoTitleBar`，且 WebView2 排在标题栏行之下、不需要页面让位，因此注入 JS 不再是自绘的前提。macOS / Linux（Tauri 壳）仍按本条执行。
+> **2026-10-21 状态变更**：Windows 原生壳已改为**自绘标题栏行**（见 [ADR-004](#adr-004-windows-原生壳自绘标题栏行内容属于壳已随-adr-003-一并废止)）。本条的否决前提之一是"Tauri 没有等价开关"，该前提只对 `src-tauri` 成立；WinUI 有 `ExtendsContentIntoTitleBar`，且 WebView2 排在标题栏行之下、不需要页面让位，因此注入 JS 不再是自绘的前提。macOS / Linux（Tauri 壳）仍按本条执行。
 
-> **2026-10-23 最终状态**：本条整体废止。三平台现在都自绘标题栏（`decorations: false` + `header` webview，见 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏)）。但本条最有价值的一条结论被继承下来并仍然强制：**不向 `dsh` 页面注入任何 JS**——双 webview 正是为了在不注入的前提下让标题栏常驻。本条否掉「注入 JS 让页面让位」的理由，今天依然成立。
+> **2026-10-23 最终状态**：本条整体废止。三平台现在都自绘标题栏（`decorations: false` + `header` webview，见 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏)）。但本条最有价值的一条结论被继承下来：标题栏不依赖向页面注入 JS。2026-10-25 起，应用文档会注入 preload 桥（官方契约的一部分，见 [ADR-006](#adr-006-渲染层-origin-拆分)），但那是为了对齐桌面能力，不是为了给标题栏让位；「注入 JS 让页面让位」仍然否掉。
 
 ### ADR-002 单一 Tauri 代码线，不做 macOS / Windows 双原生壳
 
@@ -186,7 +196,7 @@ d  刷写日志、释放单实例锁、退出
 - macOS 侧的验收只能靠 CI 构建通过 + 真机手测，文档里不得出现"已验证 macOS 行为"这类未发生的声明；
 - 退路不锁死：`crates/dsh-lite-core` 是零 GUI 依赖的纯 Rust 库，将来若某平台必须原生，可编成 `staticlib`（cbindgen → Swift）或 `cdylib`（P/Invoke → C#）复用，不需要重写逻辑。
 
-> **2026-10-21 状态变更**：本条在 **Windows 一侧**已被 [ADR-003](#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接) 取代，macOS / Linux 仍沿用本条（Tauri 单线）。取代的事实前提是产品明确接受"安装体积 ~75 MB"这一代价，而本条当初的核心否决理由（体积、双份维护）因此需要重新计价——重算结果见 ADR-003。
+> **2026-10-21 状态变更**：本条在 **Windows 一侧**已被 [ADR-003](#adr-003-windows-采用-winui-3-原生壳--rust-c-abi-桥接已被-adr-005-取代) 取代，macOS / Linux 仍沿用本条（Tauri 单线）。取代的事实前提是产品明确接受"安装体积 ~75 MB"这一代价，而本条当初的核心否决理由（体积、双份维护）因此需要重新计价——重算结果见 ADR-003。
 
 > **2026-10-23 恢复**：ADR-003 及其 C# 壳已被 [ADR-005](#adr-005-回到单一-tauri-壳用双-webview-画标题栏) 废止，本条重新成为三平台唯一路线。而且这次是名副其实的一条线：只有一份 `src-ui/`，没有第二套 UI 实现，也没有 C ABI 层。本条「退路不锁死」的结论同样作废——`dsh-ffi` 已删除，若将来真的需要非 Tauri 客户端，再单独决策并重建。
 
@@ -227,7 +237,7 @@ d  刷写日志、释放单实例锁、退出
 
 ### ADR-004 Windows 原生壳自绘标题栏行，内容属于壳（已随 ADR-003 一并废止）
 
-> **状态：已废。** 但它的两条结论被 ADR-005 继承：标题栏是壳的功能、菜单项只能是壳的动作、壳不向 `dsh` 页面注入任何脚本。40 DIP 的行高、与页面侧栏同色的底、把菜单声明为可交互区这三条实现约定，也照搬到了新的 `header` webview 上。
+> **状态：已废。** 但它的两条结论被 ADR-005 继承：标题栏是壳的功能、菜单项只能是壳的动作。2026-10-25 起应用文档会注入 preload 桥（ADR-006），但标题栏本身仍不依赖注入。40 DIP 的行高、与页面侧栏同色的底、把菜单声明为可交互区这三条实现约定，也照搬到了新的 `header` webview 上。
 
 **决策**：`src-winui` 用 `ExtendsContentIntoTitleBar` 自绘一条 40 DIP 标题栏行：只有**壳自己的菜单**（应用 / 视图），右侧最小化 / 最大化 / 关闭仍由 Windows 绘制，行底色取页面侧栏填充色。不向承载的 dsh 页面注入任何脚本。
 
@@ -254,8 +264,8 @@ d  刷写日志、释放单实例锁、退出
 - 观感接近官方但**不等于**官方：菜单项是壳的动作（打开设置 / 重试连接 / 打开日志目录 / 退出 / 刷新页面 / 关于），不是网页的编辑菜单；WinUI 的标题栏带只有 32 / 48 DIP 两档，而 Electron 是任意 40，所以系统按钮与 40 DIP 行不同高——这是平台差异，不伪装；
 - **行里不放品牌块**：产品名与图标只出现在窗口标题（任务栏 / Alt+Tab）与"关于"对话框里。放了品牌块就等于在页面自己的 logo 行上方再加一条同字号的信息条，重复且更显"两块头"；
 - 页面左上角不会出现官方的 16 DIP 圆角与内容让位：那是网页在 `[data-windows-titlebar]` 下自己画的，壳不注入就不该有；
-- 零 JS 注入策略不变（§5）；
-- 托盘图标、快捷键注册仍未做，见 §7 对照表。
+- 标题栏不依赖页面注入（§5）；应用文档的 preload 桥属于 ADR-006，与标题栏无关；
+- 托盘与原生菜单已实现；原生输入转发（焦点在 iframe / 内嵌 webview 时的按键）留给 P3，见 §7 对照表。
 
 
 ### ADR-005 回到单一 Tauri 壳，用双 webview 画标题栏
@@ -291,7 +301,7 @@ d  刷写日志、释放单实例锁、退出
 - `auto_resize` 不能用：它让子 webview 随窗口等比缩放，而这里需要 `header` 恒为 40 DIP、`content` 吃掉剩余高度。所以 `main.rs::layout_webviews` 在每次 `Resized` / `ScaleFactorChanged` 后按物理像素重新摆位；
 - 文档、脚本、CI 里一切「两条壳」的表述作废（含随之删除的 `build-installer.ps1` / `redeploy.ps1` / `verify-shell-*.ps1`）。
 
-### ADR-006 渲染层 origin 拆分：`dsh-app://app` 承载文档，回环 app server 承载动态流量
+### ADR-006 渲染层 origin 拆分
 
 **决策**：渲染层文档继续从 `dsh-app://app/` 加载（与官方一致）；**但动态流量不走 scheme** —— `fetch` / `XMLHttpRequest` / `EventSource` / WebSocket 一律指向 Rust 起的回环 app server（`http://127.0.0.1:<随机端口>`），由它做流式 HTTP 代理与 WS 代理，并在本地回 CORS。cookie 只由 Rust 持有并在代理端注入，页面永远拿不到。即 docs/desktop-parity.md §6.1 的「静态 dist 走 scheme，代理按接口类型拆分」。
 

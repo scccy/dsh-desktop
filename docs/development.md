@@ -124,7 +124,7 @@ cargo tauri build --config src-tauri/tauri.release.conf.json --bundles nsis
 - WebView2 不随包携带：`webviewInstallMode = downloadBootstrapper`，系统缺 WebView2 时安装器联网引导；
 - 图标来自 `src-tauri/icons/`：`assets/icon.png` 是唯一设计源（1024、圆角已烘焙进 alpha），`scripts/render-icons.ps1` 从它派生 `32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` 与标题栏用的 `src-ui/icon.png`；`assets/icon-macos.png` 是内缩 8% 的 macOS 版本；
 - **未签名**：SmartScreen 会提示未知发布者；签名点位见 §4.3；
-- 出包后手动启动一次，确认三屏与 `dsh web` 都能加载（流水线不内置冒烟检查）。
+- 出包后手动启动一次，确认 `dsh-app://shell/loading.html`、`dsh-app://app/` 与错误页都能加载（流水线不内置冒烟检查）。
 
 ### 4.5 macOS dmg（现状与缺口）
 
@@ -138,7 +138,7 @@ cargo tauri build --config src-tauri/tauri.release.conf.json --bundles nsis
 mac 落地时的阻塞项：
 
 - **签名与公证**：需要 `Developer ID Application` 证书 + `notarytool`；没有证书只能 ad-hoc 签名，用户要右键 → 打开，且 Gatekeeper 会拦下双击；
-- 本机是 Windows，**构建不出也验证不了** macOS 产物，dmg 的一切结论只能在 mac 或 CI 上得出；
+- 开发机已于 2026-10 切到 macOS（本机可构建、可真机验收）；Windows 上的历史结论来自当时的本机与 CI 记录；
 - 目标机器同样需要自备 `dsh` 与 Node（与 Windows 一致），壳不打包运行时；
 - 三平台现在是同一套 UI（同一份 `src-ui/`），不存在某个平台观感不同的问题；剩下的差异只有系统 WebView 的渲染细节（WebKitGTK / WebView2 / WKWebView）。
 
@@ -178,7 +178,7 @@ mac 落地时的阻塞项：
 ### 6.4 窗口装饰与观感
 
 - **macOS**：`decorations: true` + `title_bar_style(Overlay)` + `hidden_title(true)` + 透明窗口，红绿灯直接叠在页面上，窗口读作「侧栏 + 内容」两块头部；
-- **Windows / Linux**：标题栏由壳自己画（`decorations: false`，顶上 40 DIP 的 `header` webview，下面是 `content` webview）。历史与被否掉的替代方案见 [ADR-005](architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)，origin 拆分见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)；
+- **Windows / Linux**：标题栏由壳自己画（`decorations: false`，顶上 40 DIP 的 `header` webview，下面是 `content` webview）。历史与被否掉的替代方案见 [ADR-005](architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)，origin 拆分见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分)；
 - 底色是取样自页面的纯色（浅 `#f9fafb` / 深 `#17181b`），与内容区无缝衔接；**没有 Mica**，因为 WebView2 里拿不到系统 Mica 材质，用同色近似。切深色主题或 `dsh` 改版时这两个值要复核；
 - 拖动只绑在菜单右侧的空白条（`.drag`），400 ms 内的第二次按下判为双击 → 最大化；三个窗口按钮走 `shell_window_action`，关闭仍走 `CloseRequested`，所以 `window.closeAction` 的 hide / quit 语义不变；
 - 无边框窗口的阴影由 Tauri 默认的 DWM 阴影提供，圆角交给系统；本项目不额外调用 DWM API；
@@ -191,7 +191,7 @@ mac 落地时的阻塞项：
 - 两项都是壳的动作，没有「编辑」菜单：编辑能力由 WebView2 自带的 `Ctrl+Z/Y/X/C/V/A` 与 `Delete` 承担，壳不注册也不拦截；
 - **应用**：打开设置 / 重试连接（`Ctrl+Shift+L`）/ 打开日志目录 / 检查 dsh 更新… / 退出（`Ctrl+Q`）；
 - **视图**：刷新页面（`Ctrl+R`）/ 关于 dsh desktop；
-- 「重试连接」重跑整条启动链（停掉 `dsh` 再起，`connection::restart`），「刷新页面」只让 `content` webview 重新加载当前 URL（`Webview::reload`）——两者不可混淆；
+- 「重试连接」重跑整条启动链：三层栈下先停 Host + app server（`app_runtime::stop`）再重启，旧路径下是 `connection::restart`；「刷新页面」只让 `content` webview 重新加载当前 URL（`Webview::reload`）——两者不可混淆；
 - 菜单是**原生 popup**（`Menu::popup_at`），不是 HTML 下拉：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉；
 - **DESKTOP 桥只注入应用文档**：`bridge/preload.js` 通过 `initialization_script` 注入到 `content` webview，但每个命令都会校验调用方必须是 `dsh-app://app` 主 frame；旧的 `dsh web` 附着路径（`--url` / `--port`）不注入桥，`shortcuts.rs` 的监听脚本在非壳页面上直接返回。`Ctrl+R` 由 WebView 自己重载页面，与「刷新页面」等效；
 - macOS 不受影响：应用菜单的 Edit 子菜单走 AppKit responder chain，是真正的原生编辑。
@@ -209,6 +209,22 @@ DSH_DEBUG_EVAL=/tmp/dsh-eval.js ./target/debug/dsh-desktop
 它只在 `debug_assertions` 下编译，且必须显式设置 `DSH_DEBUG_EVAL` 才会启动监听线程；release 包没有这条路径。验收时用它读取 `data-platform`、`dshDesktop.protocolVersion`、`__DSH_TRANSPORT__` 等页面状态。
 
 真机验收建议使用隔离的 `DSH_HOME`（例如 `DSH_HOME=/tmp/dsh-desktop-home`，把 `~/.dsh/profiles/desktop` 与 `.credentials.yaml` 复制进去），这样测试产生的 session 与插件状态不会污染日常使用的 Home。
+
+### 6.7 三层链路手工验收（P1/P2）
+
+```sh
+cargo build -p dsh-desktop
+DSH_DEBUG_EVAL=/tmp/dsh-eval.js ./target/debug/dsh-desktop --verbose
+```
+
+按顺序核对：
+
+1. 日志出现 `desktop host ready` → `app server listening` → `three-layer desktop stack ready … (13 injections)`；
+2. 日志出现 `desktop boot: 13 injections, stream base http://127.0.0.1:<port>`（说明页面走到了桥）；
+3. `DSH_DEBUG_EVAL` 文件写 `return { p: document.documentElement.dataset.platform, proto: dshDesktop.protocolVersion, tr: __DSH_TRANSPORT__ }`，
+   日志应出现 `platform:"darwin"`、`protocolVersion:1`、`ownsHost:true`；
+4. 页面发一条消息，日志出现 `POST /api/session/prompt -> 200 (host)` 与 `websocket /api/remote.mux -> 101`，界面 2 秒内流式渲染回复；
+5. 菜单「重试连接」后日志出现新的 `desktop host ready`（pid/端口变化）且只剩一个 `desktop-host.mjs` 进程。
 
 ## 7. 提交前的最小检查
 

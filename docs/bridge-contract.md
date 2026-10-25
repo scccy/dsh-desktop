@@ -6,24 +6,33 @@ Tauri 版的 Electron preload 等价物。基线是官方 `apps/desktop/src/prel
 - 脚本：`src-tauri/bridge/preload.js`（纯 JS，无构建，`node --check` 通过）
 - Rust：`src-tauri/src/bridge.rs`（命令 / 事件 / `BridgeState`）
 - 注入：content webview 的 `initialization_script`（主 frame，页面前执行）
+- **状态（2026-10-25）**：已接线并在 macOS 真机验收（13 injections、`data-platform=darwin`、无 `Desktop keyboard bridge unavailable`、对话流式回复）。
 
-## 集成清单（Lead 负责接线）
+## 接线现状（已落地）
 
 ```rust
-mod bridge;                                  // main.rs
-.manage(bridge::BridgeState::new(data_dir))  // 启动时
-.invoke_handler(bridge_handler!())           // 或手抄下面 22 个命令名
+// main.rs：state、命令、注入脚本
+.manage(bridge::BridgeState::new(data_dir.clone()))
+// invoke_handler 里逐条注册（与 shell 命令合并；也可用 bridge_handler!()）
+bridge::desktop_boot, bridge::desktop_console, …, bridge::desktop_browser_release
 
-// window.rs 建 content webview 时：
-.initialization_script(bridge::bridge_script(Some("dsh-app://app")))
+// main.rs 建 content webview 时：
+.initialization_script(bridge::bridge_script(Some(bridge::APP_SCHEME_ORIGIN)))
 
-// Host ready 之后（bridge.rs 无法自己拿到）：
-bridge.set_boot(ready.injections.clone(), ready.origin.clone());
-bridge.set_app_base(app_server_origin);      // "http://127.0.0.1:<port>"，无尾斜杠
+// app_runtime::start() 在 Host 就绪、app server 起来之后：
+bridge.set_boot(injections.clone(), app_base.clone());  // app_base = "http://127.0.0.1:<port>"
+bridge.set_app_base(app_base);
+
+// main.rs 窗口事件：
+bridge::notify_workspace_entered(&app);   // 应用文档加载完成
+bridge::notify_fullscreen(&app, fullscreen); // 窗口全屏状态变化
+
+// 页面诊断（release 无 inspector 时把 console/未捕获异常写进滚动日志）：
+bridge::desktop_console(level, message)
 ```
 
 命令（`#[tauri::command]`，均为 content webview + app origin 双校验）：
-`desktop_boot`, `desktop_boot_failed`, `desktop_device_info`, `desktop_directory_pick`,
+`desktop_boot`, `desktop_console`, `desktop_boot_failed`, `desktop_device_info`, `desktop_directory_pick`,
 `desktop_shortcuts_get`, `desktop_shortcuts_edit`, `desktop_shortcuts_recording`,
 `desktop_shortcuts_close_window`, `desktop_updates_status`, `desktop_updates_open`,
 `desktop_locale_bootstrap`, `desktop_locale_changed`, `desktop_onboarding_api_key`,
@@ -35,11 +44,11 @@ bridge.set_app_base(app_server_origin);      // "http://127.0.0.1:<port>"，无�
 
 | 事件 | payload | 触发方 |
 |---|---|---|
-| `dsh-desktop://shortcuts-input` | `DesktopShortcutInput` | 菜单/键盘持有者（`bridge::notify_shortcut_input`） |
+| `dsh-desktop://shortcuts-input` | `DesktopShortcutInput` | 菜单/键盘持有者（`bridge::notify_shortcut_input`；P3 接原生输入） |
 | `dsh-desktop://shortcuts-changed` | `ShortcutConfigSnapshot` | `desktop_shortcuts_edit` |
 | `dsh-desktop://updates-presentation` | `DesktopUpdatePresentation` | `desktop_updates_open` |
-| `dsh-desktop://window-fullscreen` | `bool` | 窗口所有者（`bridge::notify_fullscreen`） |
-| `dsh-desktop://enter-workspace` | `null` | 工作区交棒（`bridge::notify_workspace_entered`） |
+| `dsh-desktop://window-fullscreen` | `bool` | `main.rs` 在窗口尺寸/全屏变化时 emit（已接线） |
+| `dsh-desktop://enter-workspace` | `null` | `main.rs` 在 `dsh-app` 文档加载完成后 emit（已接线） |
 | `dsh-desktop://browser-open-requested` | `{ lease, url }` | P3 |
 | `dsh-desktop://boot-failed` | 失败消息 | `desktop_boot_failed` |
 
@@ -50,7 +59,7 @@ bridge.set_app_base(app_server_origin);      // "http://127.0.0.1:<port>"，无�
 
 | 桥成员（JS） | 官方签名 | Tauri 后端 | 状态 |
 |---|---|---|---|
-| `dshDesktopBoot.ready()` | `Promise<{injections,streamBaseUrl}>` | `desktop_boot` | implemented（需 `set_boot`） |
+| `dshDesktopBoot.ready()` | `Promise<{injections,streamBaseUrl}>` | `desktop_boot` | implemented（真机验收：13 injections） |
 | `dshDesktopBoot.failed(m)` | `Promise<void>` | `desktop_boot_failed` → 日志 + 事件 + 现有 error.html | implemented |
 | `dshDesktop.protocolVersion` | `1` | — | implemented |
 | `.deviceInfo()` | `Promise<string>`（`platform/os/app_arch/cpu/memory_gib`，`; ` 分隔） | `desktop_device_info` | implemented（Windows 无 `os` 字段） |
@@ -73,11 +82,12 @@ bridge.set_app_base(app_server_origin);      // "http://127.0.0.1:<port>"，无�
 | `__DSH_LOCALE__.read()` | `Promise<{languages,preference}>` | `desktop_locale_bootstrap`（sys-locale） | implemented |
 | `__DSH_LOCALE__.onChange(l)` | `void`（原为 send） | `desktop_locale_changed`（落 `locale-preference.json`） | implemented |
 | `html[data-platform]` | preload 同步打标 | UA 兜底 + `desktop_platform` 修正 | implemented |
-| `html[data-fullscreen]` | `window-fullscreen` IPC | `window-fullscreen` 事件 | implemented（需窗口侧 emit） |
+| `html[data-fullscreen]` | `window-fullscreen` IPC | `window-fullscreen` 事件 | implemented（窗口侧已 emit） |
 | native theme | 观察 `data-ds-theme-source` → `nativeTheme.themeSource` | `desktop_native_theme_set` → `Window::set_theme` | implemented |
 | `enter-workspace` | 聚焦 body | `enter-workspace` 事件 | implemented |
 | 动态流量改写 | Electron 用 `protocol.handle` 代理 | `fetch` / `XMLHttpRequest` → `desktop_app_base` | implemented（见差异 4） |
 | `__DSH_BRIDGE_ESCAPE__.nativeFetch/nativeXhr/appBase` | 无（Electron preload 不暴露） | — | implemented（诊断 / 自救通道） |
+| 页面诊断 | 无对应（Electron 有 inspector） | `console.warn/error`、`error`、`unhandledrejection` → `desktop_console` | implemented（release 无 inspector 时的排障通道） |
 
 验证脚本（都不起 GUI）：
 
