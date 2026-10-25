@@ -110,6 +110,7 @@ pub fn shutdown(app: &AppHandle) {
             return;
         }
         connection::stop_child(state);
+        crate::app_runtime::stop(state);
         persist_layout(app, state);
         state.logger.info("shell shut down");
     }
@@ -131,6 +132,7 @@ pub fn show_main_window(app: &AppHandle) {
 }
 
 /// Hides the main window, keeping the process alive.
+#[allow(dead_code)] // tray/menu entry point, wired in P3
 pub fn hide_main_window(app: &AppHandle) {
     if let Some(window) = app.get_window(MAIN_WINDOW) {
         let _ = window.hide();
@@ -138,6 +140,7 @@ pub fn hide_main_window(app: &AppHandle) {
 }
 
 /// Whether the main window is currently visible.
+#[allow(dead_code)] // tray/menu entry point, wired in P3
 pub fn main_window_visible(app: &AppHandle) -> bool {
     app.get_window(MAIN_WINDOW)
         .and_then(|window| window.is_visible().ok())

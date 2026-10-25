@@ -22,6 +22,9 @@
       "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "host/desktop-host.mjs"
     ]
   }
 }

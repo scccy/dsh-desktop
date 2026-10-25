@@ -775,6 +775,7 @@ fn node_version() -> Option<String> {
 /// `prefix_args` carry the wrapper a script shim needs; callers obtain them
 /// from [`crate::platform::shell_program`] instead of passing a bare `.cmd`
 /// name to `CreateProcess`.
+#[allow(dead_code)] // kept for the update checker's future in-shell reporting
 pub fn helper_output(
     program: &str,
     prefix_args: &[String],
@@ -789,15 +790,13 @@ pub fn helper_output(
     .map(|capture| (capture.code, capture.output))
 }
 
-/// Whether `latest` is a newer release than `installed`.
-///
-/// Delegates to `dsh_lite_core::update` so the Tauri shell and the WinUI shell
-/// cannot drift on what counts as an update.
-pub use dsh_lite_core::update::update_is_newer;
+// The update comparison lives in `dsh_lite_core::update`; the WinUI shell that
+// used to re-export it is gone (ADR-005).
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dsh_lite_core::update::update_is_newer;
 
     fn config() -> Config {
         Config::default()

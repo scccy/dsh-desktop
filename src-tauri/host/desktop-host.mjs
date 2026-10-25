@@ -16,9 +16,17 @@
  * Python/Node/dsh/pnpm is shipped. See docs/desktop-parity.md (G2).
  *
  * Protocol (one JSON object per line, stdout):
- *   DSH_HOST_READY <json>   {"url": "...", "injections": <count>}
- *   DSH_HOST_FATAL <json>   {"message": "...", "diagnostic": "..."}
- * stdout is reserved for the protocol; all diagnostics go to stderr.
+ *   DSH_HOST_READY <json>   {"url":"http://127.0.0.1:PORT/?token=…",
+ *                            "origin":"http://127.0.0.1:PORT",
+ *                            "protocol":"http:","protocolVersion":1,
+ *                            "injections":[{…},…]}
+ *   DSH_HOST_FATAL <json>   {"code":"version","message":"…",
+ *                            "found":"0.2.0","minimum":"0.2.1-rc.2"}
+ *
+ * `injections` is the complete row array (the rows carry the index HTML, styles
+ * and scripts), written in a single flushed write so a multi-hundred-kilobyte
+ * payload is never split or truncated. stdout is reserved for the protocol; all
+ * diagnostics go to stderr.
  *
  * stdin: the line `shutdown` asks for a graceful stop; closing stdin does the
  * same. SIGTERM/SIGINT are treated as shutdown too.
@@ -28,11 +36,28 @@
  *   (or env DSH_DESKTOP_DSH_PACKAGE / DSH_DESKTOP_PROJECT_DIR / DSH_CLIENT_VERSION)
  */
 
-import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 
 const MAX_DIAGNOSTIC = 64 * 1024
+
+// Version policy. Must match `crates/dsh-lite-core/src/version_gate.rs`.
+// `0.2.0-rc.2` boots but skips the marketplace bundle and reports no
+// `webServer.protocol`; `0.2.1-rc.2` is the first release that matches this
+// launcher's contract, so everything older is refused with the upgrade command.
+const MINIMUM_VERSION = '0.2.1-rc.2'
+const TESTED_VERSION = '0.2.1'
+const UPGRADE_COMMAND = 'npm i -g @deepseek-ai/dsh'
+const VERSION_PROBE_TIMEOUT_MS = 20_000
+
+/** Protocol version of this stdout contract. */
+const PROTOCOL_VERSION = 1
+
+/** `token=VALUE` fragments in redirected diagnostics. */
+const TOKEN_IN_TEXT = /token=[^\s&"']*/gi
 
 function parseArgs(argv) {
   const out = { dsh: undefined, project: undefined, version: undefined }
@@ -50,26 +75,191 @@ function parseArgs(argv) {
   return out
 }
 
-function send(line) {
-  process.stdout.write(line + '\n')
+/**
+ * Keeps stdout for this protocol alone.
+ *
+ * The profile boot prints its own `dsh web: <url>` readiness line to stdout, and
+ * that line carries the one-shot token. Anything that is not a `DSH_HOST_*` line
+ * is moved to stderr, where the shell keeps only a redacted tail.
+ */
+function claimStdout() {
+  const write = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (chunk, encoding, callback) => {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    const done = typeof encoding === 'function' ? encoding : callback
+    if (text.startsWith('DSH_HOST_READY ') || text.startsWith('DSH_HOST_FATAL ')) {
+      return write(text, done)
+    }
+    // The token is redacted here as well: the shell redacts its own tails, but a
+    // launcher run from a terminal must not spill it either.
+    return process.stderr.write(text.replace(TOKEN_IN_TEXT, 'token=<redacted>'), done)
+  }
+}
+
+/** Writes one protocol line and resolves once the bytes reached the OS. */
+function sendLine(line) {
+  const payload = line + '\n'
+  return new Promise((resolve, reject) => {
+    process.stdout.write(payload, (error) => (error ? reject(error) : resolve()))
+  })
+}
+
+function warn(message) {
+  process.stderr.write(`desktop host: ${message}\n`)
+}
+
+/**
+ * Reads the first semantic version in `text`.
+ * Build metadata is captured but ignored during comparison (semver §10).
+ */
+function parseVersion(text) {
+  const match = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?/.exec(String(text))
+  if (!match) return undefined
+  return {
+    raw: match[0],
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ? match[4].split('.') : [],
+  }
+}
+
+function compareIdentifiers(left, right) {
+  const leftNumeric = /^\d+$/.test(left)
+  const rightNumeric = /^\d+$/.test(right)
+  if (leftNumeric && rightNumeric) return Math.sign(Number(left) - Number(right))
+  if (leftNumeric) return -1
+  if (rightNumeric) return 1
+  return left === right ? 0 : left < right ? -1 : 1
+}
+
+/** Semver precedence; a prerelease sorts below the release it leads to. */
+function compareVersions(left, right) {
+  for (const key of ['major', 'minor', 'patch']) {
+    if (left[key] !== right[key]) return left[key] < right[key] ? -1 : 1
+  }
+  const leftPre = left.prerelease
+  const rightPre = right.prerelease
+  if (leftPre.length === 0 && rightPre.length === 0) return 0
+  if (leftPre.length === 0) return 1
+  if (rightPre.length === 0) return -1
+  const shared = Math.min(leftPre.length, rightPre.length)
+  for (let index = 0; index < shared; index += 1) {
+    const ordering = compareIdentifiers(leftPre[index], rightPre[index])
+    if (ordering !== 0) return ordering
+  }
+  return Math.sign(leftPre.length - rightPre.length)
+}
+
+function readManifest(dshPackage) {
+  try {
+    return JSON.parse(readFileSync(join(dshPackage, 'package.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function manifestBin(manifest) {
+  if (typeof manifest.bin === 'string') return manifest.bin
+  if (manifest.bin && typeof manifest.bin === 'object' && typeof manifest.bin.dsh === 'string') {
+    return manifest.bin.dsh
+  }
+  return undefined
+}
+
+/**
+ * Asks the installed dsh for its version.
+ *
+ * `dsh --version` is the public contract; the package manifest is only the
+ * fallback when the CLI cannot be run, so a wrapper or a stripped install does
+ * not turn into a false refusal.
+ */
+function readDshVersion(dshPackage) {
+  const manifest = readManifest(dshPackage)
+  const entry = manifestBin(manifest) ?? 'lib/bin.js'
+  try {
+    const output = execFileSync(process.execPath, [join(dshPackage, entry), '--version'], {
+      encoding: 'utf8',
+      timeout: VERSION_PROBE_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const version = parseVersion(output)
+    if (version) return { version, source: 'dsh --version' }
+  } catch {
+    // Fall through to the manifest; the probe itself is not a gate.
+  }
+  const fallback = parseVersion(manifest.version ?? '')
+  if (fallback) return { version: fallback, source: 'package.json' }
+  return { version: undefined, source: 'none' }
+}
+
+/**
+ * Classifies the reported version.
+ *
+ * - `below`      → refuse: the profile this launcher drives does not exist yet;
+ * - `untested`   → accept with a warning: a newer dsh may have changed the
+ *                  desktop profile, but refusing it would break on every release;
+ * - `supported`  → accept;
+ * - `unknown`    → accept with a warning: a version we cannot compare is not
+ *                  evidence that dsh is broken.
+ */
+function gateVersion(reported) {
+  if (!reported.version) return { state: 'unknown' }
+  const minimum = parseVersion(MINIMUM_VERSION)
+  const tested = parseVersion(TESTED_VERSION)
+  const found = reported.version.raw
+  if (compareVersions(reported.version, minimum) < 0) return { state: 'below', found }
+  if (compareVersions(reported.version, tested) > 0) return { state: 'untested', found }
+  return { state: 'supported', found }
+}
+
+async function refuseVersion(gate, source) {
+  await sendLine(
+    'DSH_HOST_FATAL ' +
+      JSON.stringify({
+        code: 'version',
+        message: `dsh ${gate.found} is older than the required ${MINIMUM_VERSION} (read from ${source}); upgrade with \`${UPGRADE_COMMAND}\` and try again`,
+        found: gate.found,
+        minimum: MINIMUM_VERSION,
+        upgrade: UPGRADE_COMMAND,
+      }),
+  )
+  process.exitCode = 1
 }
 
 async function main() {
+  claimStdout()
   const args = parseArgs(process.argv.slice(2))
   const dshPackage = args.dsh ?? process.env.DSH_DESKTOP_DSH_PACKAGE
   const projectDir = args.project ?? process.env.DSH_DESKTOP_PROJECT_DIR
   if (!dshPackage) throw new Error('desktop host: --dsh (or DSH_DESKTOP_DSH_PACKAGE) is required')
   if (!projectDir) throw new Error('desktop host: --project (or DSH_DESKTOP_PROJECT_DIR) is required')
 
+  // Gate the installed dsh before paying for a profile boot: a stale install
+  // fails deep inside the profile otherwise, which is hard to read.
+  const reported = readDshVersion(dshPackage)
+  const gate = gateVersion(reported)
+  if (gate.state === 'below') {
+    await refuseVersion(gate, reported.source)
+    return
+  }
+  if (gate.state === 'untested') {
+    warn(
+      `dsh ${gate.found} is newer than the tested ${TESTED_VERSION}; continuing, but the desktop profile may have changed`,
+    )
+  }
+  if (gate.state === 'unknown') {
+    warn(`could not read the dsh version (${reported.source}); continuing without the version check`)
+  }
+
   // The desktop profile's telemetry plugin validates `serviceVersion` from this
   // variable (`packages/bundle/web-app/cordis.patch.yml`); without it the boot
   // aborts before the web server starts.
   process.env.DSH_CLIENT_VERSION ??= args.version ?? '0.0.0'
 
-  // `runtimeDir` is the directory that contains `node_modules/@deepseek-ai/dsh`,
-  // i.e. the install anchor the official shell computes from its bundled runtime.
+  // The install anchor is the manifest the official shell computes from its
+  // bundled runtime: profile resolution is anchored on it.
   const installAnchor = join(dshPackage, 'package.json')
-  const runtimeDir = dirname(dirname(dirname(dshPackage)))
 
   const { runProfile } = await import(pathToFileURL(join(dshPackage, 'lib', 'profile-boot.js')).href)
   const { loadLayeredEnv, loadProfileDirectory, reportSkippedBundles } = await import(
@@ -115,16 +305,28 @@ async function main() {
   // 0.2.0-rc line does not, and the server is plain http there.
   const protocol = ctx.webServer.protocol ?? 'http:'
   const port = ctx.webServer.port
-  const url = ctx.connection.authenticatedUrl(`${protocol}//127.0.0.1:${String(port)}`)
-  const injections = ctx.webServer.collectIndexInjections?.(ctx.connection.browserPeer) ?? []
+  const origin = `${protocol}//127.0.0.1:${String(port)}`
+  const url = ctx.connection.authenticatedUrl(origin)
+  // The rows carry the index HTML, styles and scripts: send them whole, the
+  // renderer needs them to boot (`dshDesktopBoot.ready()` in the preload bridge).
+  let injections = []
+  if (typeof ctx.webServer.collectIndexInjections === 'function') {
+    const rows = ctx.webServer.collectIndexInjections(ctx.connection.browserPeer)
+    if (Array.isArray(rows)) injections = rows
+  } else {
+    warn('this dsh does not expose index injections; starting without them')
+  }
 
-  send('DSH_HOST_READY ' + JSON.stringify({ url, injections: injections.length }))
+  await sendLine(
+    'DSH_HOST_READY ' +
+      JSON.stringify({ url, origin, protocol, protocolVersion: PROTOCOL_VERSION, injections }),
+  )
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   const message = error instanceof Error ? error.message : String(error)
   const diagnostic = inspect(error, { depth: 4, maxArrayLength: 50 }).slice(0, MAX_DIAGNOSTIC)
-  send('DSH_HOST_FATAL ' + JSON.stringify({ message, diagnostic }))
+  await sendLine('DSH_HOST_FATAL ' + JSON.stringify({ message, diagnostic })).catch(() => {})
   console.error(error)
   process.exitCode = 1
 })

@@ -1,6 +1,6 @@
 # 与官方 Desktop 对齐的开发目标
 
-> 状态：**目标草案（待评审）**。本文只定义「要做什么、为什么、边界和验收」，不锁定实现细节；
+> 状态：**P1 + P2 已落地并真机验收（2026-10-25）**；P3 原生能力与 P4 收尾待做。本文只定义「要做什么、为什么、边界和验收」，不锁定实现细节；
 > 具体实现决策落地后，回填到 [architecture.md](architecture.md) 的 ADR 与本文的阶段记录。
 >
 > 参考实现：官方源码 `apps/desktop`（路径 `/Volumes/project/github/dsh/deepseek-harness/apps/desktop`）。
@@ -197,6 +197,41 @@
 - `stdin` 写 `shutdown` 可优雅退出（exit 0）；stdout 协议：`DSH_HOST_READY <json>` / `DSH_HOST_FATAL <json>`，诊断走 stderr；
 - Rust 侧已接入 `dsh-lite-core::desktop_host`（spawn / 解析 / 优雅停止，进程组随 Rust 生命周期回收），并加了 `tests/desktop_host_e2e.rs`（默认 ignore）做真机端到端；
 - marketplace bundle：`0.2.0-rc.2` 下 `@deepseek-ai/dsh-experimental-plugin-market-bundle` 会因解析不到被跳过；**`0.2.1-rc.2` 已不再跳过**。
+
+### 7.2 P1 + P2 进展（2026-10-25 真机验收）
+
+三层链路已在真机 macOS（WKWebView）上端到端跑通，验收方式与结果：
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| Host（desktop profile） | 通过 | `desktop host ready (pid …)`，`injections=13`（38.9KB 数组） |
+| 一次性 token → cookie | 通过 | `303 + set-cookie` 换 cookie，cookie 只存在 Rust 内存 |
+| 回环 app server | 通过 | `app server listening at http://127.0.0.1:<port>/` |
+| 文档 origin | 通过 | 窗口加载 `dsh-app://app/`，`document.documentElement.dataset.platform === "darwin"` |
+| boot 契约 | 通过 | `desktop boot: 13 injections, stream base http://127.0.0.1:<port>`；`__DSH_TRANSPORT__={ownsHost:true, streamBaseUrl}` |
+| preload 桥 | 通过 | `typeof dshDesktop === "object"`、`protocolVersion === 1`；无 `Desktop keyboard bridge unavailable` |
+| 代理（HTTP） | 通过 | 页面 API 全部经 `app_server` 转发（55+ 请求 200），CORS preflight 本地 204 |
+| 代理（WS） | 通过 | `websocket /api/remote.mux -> 101 (host upgraded)` |
+| 对话 + 流式 | 通过 | 页面发消息 → `POST /api/session/prompt 200` → 2 秒后页面实时渲染回复，用量 10.3k tok |
+
+**架构决策**：见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)。
+`dsh-app://` 只承载文档、静态资源与模块脚本；`fetch` / `XMLHttpRequest` / `EventSource` / WebSocket 全部走回环 app server（Rust 注入 cookie、CORS 白名单回显）。决策依据是真机 spike：
+[docs/spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md)（scheme 响应无法流式、自定义 scheme 是 secure context 但 WKWebView 不实现 Media Capture）。
+
+**实现位置**：
+
+| 层 | 文件 |
+|---|---|
+| Host 启动器 | `src-tauri/host/desktop-host.mjs` + `crates/dsh-lite-core/src/desktop_host.rs` |
+| 编排（定位/版本/环境/Host/认证/服务） | `src-tauri/src/app_runtime.rs` |
+| `dsh-app://` scheme | `src-tauri/src/scheme.rs` |
+| 回环代理（静态 + 流式 HTTP + WS + CORS） | `crates/dsh-lite-core/src/app_server/*` |
+| preload 桥（含 fetch/XHR 重写 shim） | `src-tauri/src/bridge.rs` + `src-tauri/bridge/preload.js` |
+| 前端 dist 解析 / 版本闸门 | `crates/dsh-lite-core/src/frontend_dist.rs` / `version_gate.rs` |
+
+**门禁**：`cargo test --workspace` **281 passed**；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 干净。
+
+**尚未完成（P3/P4）**：麦克风（需原生 AVCaptureSession 采集）、内嵌浏览器（子 webview + `<webview>` 兼容层）、深链 `dsh://open`、退出确认、崩溃报告、macOS vibrancy/红绿灯位置精调、Windows/Linux 真机验证、EventSource shim（当前 dev-only）、`__DSH_HOST_PATHS__`（Tauri 无 `webUtils`）。
 
 ## 8. 决策（全部对齐官方，不抄近路）
 

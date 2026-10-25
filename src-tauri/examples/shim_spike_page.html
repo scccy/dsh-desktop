@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dsh-app shim end-to-end spike</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: #14161a; color: #d7dae0; margin: 0; padding: 12px 16px; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: #8ec07c; }
+  #status { color: #83a598; margin-bottom: 6px; white-space: pre-wrap; }
+  #log { max-height: 62vh; overflow: auto; border: 1px solid #2b2f36; padding: 8px; background: #0f1114; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 0; }
+</style>
+</head>
+<body>
+<h1>dsh-app://app init-script shim &middot; end-to-end spike</h1>
+<div id="status">booting&hellip;</div>
+<pre id="log"></pre>
+<script>
+"use strict";
+(function () {
+  var SHIM = window.__dshShim || null;
+  var BASE = SHIM ? SHIM.base : "http://127.0.0.1:__PORT__";
+  var APP = "dsh-app://app";
+  var T0 = performance.now();
+
+  function nowMs() { return Math.round((performance.now() - T0) * 10) / 10; }
+  function errText(e) {
+    try {
+      if (e === null || e === undefined) return String(e);
+      var name = e.name ? String(e.name) : "";
+      var msg = e.message !== undefined ? String(e.message) : String(e);
+      return (name ? name + ": " : "") + msg;
+    } catch (_) { return "unprintable-error"; }
+  }
+  function safe(fn) { try { return { ok: true, value: fn() }; } catch (e) { return { ok: false, error: errText(e) }; } }
+  function withTimeout(p, ms, label) {
+    return Promise.race([p, new Promise(function (_, rej) {
+      setTimeout(function () { rej(new Error("timeout " + label + " after " + ms + "ms")); }, ms);
+    })]);
+  }
+  function hex(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return s;
+  }
+  function fnv(bytes) {
+    var sum = 0, mix = 2166136261;
+    for (var i = 0; i < bytes.length; i++) {
+      sum = (sum + bytes[i]) >>> 0;
+      mix = Math.imul(mix ^ bytes[i], 16777619) >>> 0;
+    }
+    return { len: bytes.length, mix: mix, sum: sum, head_hex: hex(bytes.slice(0, 16)), tail_hex: hex(bytes.slice(-16)) };
+  }
+  function b64url(str) {
+    var bytes = new TextEncoder().encode(str);
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  var R = {
+    mode: "shim",
+    ua: navigator.userAgent,
+    started_wall_ms: Date.now(),
+    steps: {},
+    trace: [],
+    uncaught: []
+  };
+  window.addEventListener("error", function (ev) {
+    R.uncaught.push({ t_ms: nowMs(), message: "window.onerror: " + (ev.message || "") + " @" + (ev.filename || "") + ":" + (ev.lineno || 0) });
+  });
+  window.addEventListener("unhandledrejection", function (ev) {
+    R.uncaught.push({ t_ms: nowMs(), message: "unhandledrejection: " + errText(ev.reason) });
+  });
+
+  var LOG = [];
+  function log(line) {
+    LOG.push(nowMs() + "ms  " + line);
+    R.trace.push({ t_ms: nowMs(), line: line });
+    var el = document.getElementById("log");
+    if (el) { el.textContent = LOG.join("\n"); el.scrollTop = el.scrollHeight; }
+    var st = document.getElementById("status");
+    if (st) st.textContent = line;
+  }
+  async function step(name, fn) {
+    var start = nowMs();
+    log("> " + name);
+    var rec = { t_start_ms: start };
+    try { rec.value = await fn(); rec.ok = true; }
+    catch (e) { rec.ok = false; rec.error = errText(e); }
+    rec.t_end_ms = nowMs();
+    rec.duration_ms = Math.round((rec.t_end_ms - start) * 10) / 10;
+    R.steps[name] = rec;
+    log((rec.ok ? "ok " : "FAIL ") + name + " (" + rec.duration_ms + "ms)" + (rec.ok ? "" : "  " + rec.error));
+    return rec;
+  }
+
+  function readStream(resp, label, budgetMs) {
+    return withTimeout((async function () {
+      var reader = resp.body.getReader();
+      var dec = new TextDecoder();
+      var arrivals = [];
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        arrivals.push({ t_ms: Math.round((nowMs()) * 10) / 10, text: dec.decode(chunk.value, { stream: true }) });
+      }
+      var span = arrivals.length > 1 ? Math.round((arrivals[arrivals.length - 1].t_ms - arrivals[0].t_ms) * 10) / 10 : 0;
+      return { arrivals: arrivals, arrival_count: arrivals.length, span_ms: span };
+    })(), budgetMs, label);
+  }
+
+  function makeBlobBytes(size) {
+    var u8 = new Uint8Array(size);
+    for (var i = 0; i < size; i++) u8[i] = (i * 7 + 13) & 0xff;
+    return u8;
+  }
+
+  async function main() {
+    // ---------------------------------------------------------------- 0. env
+    await step("shim_env", async function () {
+      return {
+        location_href: location.href,
+        location_origin: location.origin,
+        isSecureContext: window.isSecureContext,
+        shim_present: !!SHIM,
+        shim_base: SHIM ? SHIM.base : null,
+        shim_installed_at_href: SHIM ? SHIM.installedAtHref : null,
+        shim_installed_at_protocol: SHIM ? SHIM.installedAtProtocol : null,
+        fetch_replaced: SHIM ? SHIM.fetchReplaced : null,
+        xhr_replaced: SHIM ? SHIM.xhrReplaced : null,
+        fetch_is_native: window.fetch === (SHIM && SHIM.nativeFetch),
+        rewrite_app_sse: SHIM ? SHIM.rewrite("dsh-app://app/sse") : "no-shim",
+        rewrite_relative: SHIM ? SHIM.rewrite("plugins/x.json") : "no-shim",
+        rewrite_loopback_passthrough: SHIM ? SHIM.rewrite("http://127.0.0.1:1/x") : "no-shim"
+      };
+    });
+    R.shim_log_after_env = SHIM ? SHIM.log.slice() : [];
+
+    // ------------------------------------------- 1. fetch SSE through the shim
+    await step("shim_fetch_sse_incremental", async function () {
+      var t = nowMs();
+      var resp = await withTimeout(fetch(APP + "/sse", { cache: "no-store" }), 15000, "shim_sse");
+      var header_ms = Math.round((nowMs() - t) * 10) / 10;
+      var out = { url_called: APP + "/sse", status: resp.status, type: resp.type,
+                  content_type: resp.headers.get("content-type"), header_ms: header_ms };
+      if (!resp.body) return out;
+      var streams = await readStream(resp, "shim_sse_body", 20000);
+      return Object.assign(out, streams);
+    });
+
+    // ------------------------------- 2. EventSource, not shimmed, direct to BASE
+    await step("eventsource_direct_incremental", function () {
+      return new Promise(function (resolve) {
+        var t = nowMs();
+        var arrivals = [];
+        var done = false;
+        var es = null;
+        function finish(extra) {
+          if (done) return;
+          done = true;
+          try { if (es) es.close(); } catch (_) {}
+          var span = arrivals.length > 1 ? Math.round((arrivals[arrivals.length - 1].t_ms - arrivals[0].t_ms) * 10) / 10 : 0;
+          resolve(Object.assign({ url: BASE + "/sse", arrivals: arrivals, arrival_count: arrivals.length, span_ms: span }, extra || {}));
+        }
+        try { es = new EventSource(BASE + "/sse"); }
+        catch (e) { resolve({ url: BASE + "/sse", ctor_error: errText(e) }); return; }
+        es.onopen = function () { arrivals.push({ t_ms: Math.round((nowMs() - t) * 10) / 10, event: "open" }); };
+        es.onmessage = function (ev) {
+          arrivals.push({ t_ms: Math.round((nowMs() - t) * 10) / 10, data: ev.data });
+          if (arrivals.length >= 4) finish({ closed_after: arrivals.length });
+        };
+        es.onerror = function () { finish({ es_error: "EventSource onerror (readyState=" + (es ? es.readyState : -1) + ")" }); };
+        setTimeout(function () { finish({ timeout: true }); }, 15000);
+      });
+    });
+
+    // ------------------------ 3. fetch POST JSON through the shim (preflight!)
+    await step("shim_fetch_post_json", async function () {
+      var payload = JSON.stringify({ hello: "world", n: 42, pad: new Array(600).join("x") });
+      var local = fnv(new TextEncoder().encode(payload));
+      var resp = await withTimeout(fetch(APP + "/echo-json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Spike": "fetch-json" },
+        body: payload
+      }), 15000, "shim_post_json");
+      var text = await resp.text();
+      var json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      var match = json ? { len: json.body_len === local.len, mix: json.body_mix === local.mix } : null;
+      return { url_called: APP + "/echo-json", payload_bytes: payload.length, local: local,
+               status: resp.status, type: resp.type, server_json: json,
+               server_text_prefix: text.slice(0, 500), match: match,
+               all_match: !!(match && match.len && match.mix) };
+    });
+
+    // ------------------------------ 4. XHR upload: FormData + 1MB Blob via shim
+    await step("shim_xhr_upload_1mb", async function () {
+      var bytes = makeBlobBytes(1024 * 1024);
+      var local = fnv(bytes);
+      var blob = new Blob([bytes], { type: "application/octet-stream" });
+      var fd = new FormData();
+      fd.append("meta", "len:" + bytes.length + ";mix:" + local.mix);
+      fd.append("file", blob, "blob.bin");
+      return await new Promise(function (resolve) {
+        var out = { url_called: APP + "/upload", local_blob: local, progress_events: 0, progress_loaded_max: 0 };
+        var xhr = new XMLHttpRequest();
+        var settled = false;
+        function done(extra) { if (settled) return; settled = true; resolve(Object.assign(out, extra)); }
+        try {
+          xhr.open("POST", APP + "/upload");
+        } catch (e) { done({ open_error: errText(e) }); return; }
+        try {
+          if (xhr.upload) {
+            xhr.upload.onprogress = function (ev) {
+              out.progress_events++;
+              if (ev && ev.loaded > out.progress_loaded_max) out.progress_loaded_max = ev.loaded;
+            };
+          }
+        } catch (e) { out.progress_hook_error = errText(e); }
+        xhr.timeout = 20000;
+        xhr.onload = function () {
+          var json = null;
+          try { json = JSON.parse(xhr.responseText); } catch (_) {}
+          done({ status: xhr.status, server_json: json, server_text_prefix: String(xhr.responseText).slice(0, 500),
+                 all_match: !!(json && json.file_len === local.len && json.file_mix === local.mix) });
+        };
+        xhr.onerror = function () { done({ xhr_error: "onerror status=" + xhr.status + " readyState=" + xhr.readyState }); };
+        xhr.ontimeout = function () { done({ xhr_error: "timeout" }); };
+        xhr.send(fd);
+      });
+    });
+
+    // ------------------- 4b. XHR custom header: buffered + replayed after open()
+    await step("shim_xhr_custom_header", async function () {
+      return await new Promise(function (resolve) {
+        var xhr = new XMLHttpRequest();
+        var settled = false;
+        function done(extra) { if (settled) return; settled = true; resolve(extra); }
+        try {
+          xhr.open("GET", APP + "/echo-json");
+          xhr.setRequestHeader("X-Spike", "xhr-header");
+        } catch (e) { done({ setup_error: errText(e) }); return; }
+        xhr.timeout = 15000;
+        xhr.onload = function () {
+          var json = null;
+          try { json = JSON.parse(xhr.responseText); } catch (_) {}
+          done({ status: xhr.status, server_json: json, server_text_prefix: String(xhr.responseText).slice(0, 400) });
+        };
+        xhr.onerror = function () { done({ xhr_error: "onerror status=" + xhr.status }); };
+        xhr.ontimeout = function () { done({ xhr_error: "timeout" }); };
+        xhr.send();
+      });
+    });
+
+    // ------------------------------ 5a. fetch(new Request(...)) GET via shim
+    await step("shim_fetch_request_get", async function () {
+      var req = new Request("dsh-app://app/plugins/x.json");
+      var resp = await withTimeout(fetch(req), 15000, "shim_req_get");
+      var text = await resp.text();
+      var json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      return { request_url: req.url, status: resp.status, type: resp.type,
+               server_json: json, server_text_prefix: text.slice(0, 400),
+               ok_rewritten: !!(json && json.path === "/plugins/x.json") };
+    });
+
+    // --------------------------- 5b. fetch(new Request(url,{method,body})) POST
+    await step("shim_fetch_request_post", async function () {
+      var req = new Request(APP + "/echo-json", { method: "POST", body: "hi" });
+      var resp = await withTimeout(fetch(req), 15000, "shim_req_post");
+      var text = await resp.text();
+      var json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      return { request_url: req.url, request_method: req.method, status: resp.status,
+               server_json: json, server_text_prefix: text.slice(0, 400),
+               body_preserved: !!(json && json.body_len === 2 && json.body_text === "hi") };
+    });
+
+    // ----- 5c. Request.mode traps: same-origin / no-cors must become cors
+    await step("shim_fetch_request_mode_override", async function () {
+      var out = {};
+      var sameOrigin = new Request(APP + "/plugins/x.json", { mode: "same-origin" });
+      try {
+        var r1 = await withTimeout(fetch(sameOrigin), 15000, "req_same_origin");
+        var t1 = await r1.text();
+        out.same_origin = { request_mode: sameOrigin.mode, status: r1.status, type: r1.type,
+                            text_prefix: t1.slice(0, 200) };
+      } catch (e) {
+        out.same_origin = { request_mode: sameOrigin.mode, error: errText(e) };
+      }
+      var noCors = new Request(APP + "/plugins/x.json", { mode: "no-cors" });
+      try {
+        var r2 = await withTimeout(fetch(noCors), 15000, "req_no_cors");
+        var t2 = await r2.text();
+        out.no_cors = { request_mode: noCors.mode, status: r2.status, type: r2.type,
+                        body_readable: t2.length > 0, text_prefix: t2.slice(0, 200) };
+      } catch (e) {
+        out.no_cors = { request_mode: noCors.mode, error: errText(e) };
+      }
+      return out;
+    });
+
+    // ------- 5d. minimal reproduction of the body-stream trap (expected to fail)
+    await step("fetch_request_stream_body_trap", async function () {
+      var src = new Request(APP + "/echo-json", { method: "POST", body: "trap-body" });
+      var target = SHIM.rewrite(src.url);
+      var out = { source_url: src.url, rewritten: target };
+      var rebuilt = null;
+      try {
+        rebuilt = new Request(target, { method: src.method, body: src.body, duplex: "half", mode: "cors" });
+        out.rebuild_constructed = true;
+      } catch (e) {
+        out.rebuild_constructed = false;
+        out.rebuild_error = errText(e);
+      }
+      if (rebuilt) {
+        try {
+          var resp = await withTimeout(SHIM.nativeFetch(rebuilt), 10000, "trap_fetch");
+          out.stream_body_accepted = true;
+          out.status = resp.status;
+          out.text = await resp.text();
+        } catch (e) {
+          out.stream_body_accepted = false;
+          out.fetch_error = errText(e);
+        }
+      }
+      out.source_body_used = src.bodyUsed;
+      try { src.clone(); out.source_clone_after = "ok"; }
+      catch (e) { out.source_clone_after = "throws: " + errText(e); }
+      return out;
+    });
+
+    // -------------------------------------------------------------- reporting
+    R.shim_log = SHIM ? SHIM.log.slice() : [];
+
+    // The page-level shim rewrites dsh-app:// URLs, so reporting uses the escape
+    // hatch reference to the native fetch.
+    await step("report_beacon_native_fetch", async function () {
+      var payload = JSON.stringify(R);
+      var b64 = b64url(payload);
+      var CH = 1500;
+      var total = Math.max(1, Math.ceil(b64.length / CH));
+      var out = { b64_len: b64.length, total_chunks: total, chunks: [], used: "shim.nativeFetch" };
+      for (var i = 0; i < total; i++) {
+        var part = b64.slice(i * CH, (i + 1) * CH);
+        try {
+          var r = await withTimeout(SHIM.nativeFetch(APP + "/__report/" + i + "/" + total + "/" + part, { cache: "no-store" }), 8000, "beacon_" + i);
+          out.chunks.push({ i: i, status: r.status, text: (await r.text()).slice(0, 80) });
+        } catch (e) {
+          out.failed_at = i;
+          out.error = errText(e);
+          break;
+        }
+      }
+      return out;
+    });
+
+    R.done = true;
+    var st = document.getElementById("status");
+    if (st) st.textContent = "DONE - shim report sent";
+    log("DONE");
+  }
+
+  main().catch(function (e) {
+    R.fatal = errText(e);
+    R.done = true;
+    R.shim_log = SHIM ? SHIM.log.slice() : [];
+    try { (SHIM && SHIM.nativeFetch ? SHIM.nativeFetch : fetch)(APP + "/__report/0/1/" + b64url(JSON.stringify(R))); } catch (_) {}
+  });
+})();
+</script>
+</body>
+</html>

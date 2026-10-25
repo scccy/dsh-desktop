@@ -291,17 +291,66 @@ d  刷写日志、释放单实例锁、退出
 - `auto_resize` 不能用：它让子 webview 随窗口等比缩放，而这里需要 `header` 恒为 40 DIP、`content` 吃掉剩余高度。所以 `main.rs::layout_webviews` 在每次 `Resized` / `ScaleFactorChanged` 后按物理像素重新摆位；
 - 文档、脚本、CI 里一切「两条壳」的表述作废（含随之删除的 `build-installer.ps1` / `redeploy.ps1` / `verify-shell-*.ps1`）。
 
+### ADR-006 渲染层 origin 拆分：`dsh-app://app` 承载文档，回环 app server 承载动态流量
+
+**决策**：渲染层文档继续从 `dsh-app://app/` 加载（与官方一致）；**但动态流量不走 scheme** —— `fetch` / `XMLHttpRequest` / `EventSource` / WebSocket 一律指向 Rust 起的回环 app server（`http://127.0.0.1:<随机端口>`），由它做流式 HTTP 代理与 WS 代理，并在本地回 CORS。cookie 只由 Rust 持有并在代理端注入，页面永远拿不到。即 docs/desktop-parity.md §6.1 的「静态 dist 走 scheme，代理按接口类型拆分」。
+
+**背景（2026-10-24 macOS WKWebView 真机实证，两轮 GUI）**：
+
+| 能力 | 结论 | 证据 |
+|---|---|---|
+| 自定义 scheme 响应流式 | **不可用** | handler 分 3 段写出（1003/2006/3011ms），页面 3013ms 才拿到响应头且只读到 1 个 chunk；回环 http 对照组 1077/2082/3086ms 增量到达 |
+| 同步 handler | 不可用且更差 | 响应同样被缓冲，还把主线程阻塞 3003ms |
+| secure context | 可用 | `isSecureContext=true`、`crypto.randomUUID`/`subtle` 可用 |
+| Media Capture | **缺失** | `navigator.mediaDevices === undefined`（P3 麦克风必须原生采集） |
+| 页面 → 回环 POST | 完整 | 16KB body 的 len/head/tail/sum/FNV 全等；`dsh-app://app/__echo-body` 也完整 |
+| 页面 → 回环 fetch 的 CORS | 必须 | 无 CORS 头 → `TypeError: Load failed`（请求已达服务端）；回显 `Access-Control-Allow-Origin: dsh-app://app` 后通过；JSON POST 触发 preflight |
+| 页面 → 回环 WS | 可用 | open@12ms，握手 `Origin: dsh-app://app`，正常收发；`document.cookie` 写入被丢弃、Set-Cookie 不落 webview jar |
+
+证据全文见 [docs/spikes/wkwebview-scheme.md](spikes/wkwebview-scheme.md)。
+
+**被否掉的替代方案**：
+
+| 方案 | 代价 | 结论 |
+|---|---|---|
+| 纯 `dsh-app://` 代理（复刻 Electron `protocol.handle`） | WKWebView 的 `WKURLSchemeHandler` 只能「完整响应」：SSE/流式回复 3 秒才一次性到达，上传与长连接都退化 | 否掉：这是平台能力缺口，不是实现问题 |
+| 页面直接由回环 http 出（同源、零 shim） | origin 与官方不同（`http://127.0.0.1` vs `dsh-app://app`），且要放弃 scheme 文档 | 不作为默认；**保留为回退开关**（shim 出问题时一键切换） |
+| 给每个接口单独判断走 scheme 还是回环 | 需要维护一张易腐的接口清单 | 否掉：按「动态流量」一刀切更稳 |
+
+**实现要点**：
+
+1. scheme handler（`src-tauri/src/scheme.rs`）只处理 `GET/HEAD`：静态 dist、`index.html` 注入 `globalThis.__DSH_BOOT_READY__`、`/assets/*`、favicon、manifest，以及前端按相对路径加载的模块脚本 `plugins/...`（缓冲式转发到 Host）。不承担流式、大上传、WS。
+2. 回环 app server（`crates/dsh-lite-core/app_server`）：HTTP 流式代理（请求体与响应边读边转）、WS 代理（升级时注入 cookie/origin/sec-fetch-site）、`/plugins/*` 强制 `no-store`；CORS 只回显白名单 Origin（macOS/Linux 为 `dsh-app://app`，Windows 为 `http://dsh-app.localhost`，Tauri 的自定义 scheme origin 两平台不同），preflight 本地 204、不落上游；不带 `Allow-Credentials`（页面不需要 cookie）。
+3. preload shim（`src-tauri/bridge/preload.js`，页面脚本前执行）：`fetch`（string/URL/Request）与 `XMLHttpRequest`（open/send 缓存重放）把 `dsh-app://app/...` 与相对路径重写到 app server origin；WebSocket 不 shim，靠 boot 返回的 `streamBaseUrl`；EventSource P1 不 shim（只有 hmr/documentpreview 用，dev-only）。
+4. boot 契约：`__DSH_BOOT_READY__` + `dshDesktopBoot.ready() → { injections, streamBaseUrl: <app server origin> }`，`__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }`。
+5. `data-platform` 必须在 `dsh-client-shortcuts` 的 `detectEnvironment` 之前同步出现在 `<html>` 上，否则前端判成 web，直接报 `Desktop keyboard bridge unavailable`。
+
+**后果**：
+
+- 安全模型与官方一致且更简单：webview 永远收不到 `Set-Cookie`（会被丢弃），cookie 只在 Rust 内存里；页面 origin 与代理 origin 分离，CORS 白名单在本地回显。
+- 新增两类风险：**R2** scheme 缓冲意味着大模块脚本/大响应会一次性进内存（单文件已 5.3MB 级，实测可接受）；**shim 覆盖面**（fetch/XHR 之外的 API，如 `sendBeacon`、worker 内的 fetch，需按需补）。
+- **R1 麦克风**：WKWebView 不实现 Media Capture，P3 的麦克风改为原生能力（AVCaptureSession 采集后喂给页面），不再算「web 能力对齐」。
+- Windows/Linux 未验证：Tauri 自定义 scheme 在 Windows 上是 `http://dsh-app.localhost`，CORS 白名单与 `data-platform` 都要按平台复核。
+- 回退开关：app server 本来也能直出 dist，若 shim 在某个插件上出问题，可把窗口 URL 切成 app server origin（同源、零 shim）作为逃生门，不影响 Host/代理/桥。
+
 ## 7. 落地对照
 
 | 能力 | 实现位置 |
 |---|---|
-| 三屏（加载 / 错误 / 设置） | `src-ui/` 零构建 HTML/CSS，装在 `content` webview |
-| 壳自己的标题栏 | `src-ui/header.html` + `header` webview（ADR-005） |
+| 三屏（加载 / 错误 / 设置） | `src-ui/` 零构建 HTML/CSS，由 `dsh-app://shell/<page>`（scheme）与回环 `/_shell/*` 两处供给 |
+| 壳自己的标题栏 | `src-ui/header.html` + `header` webview（仅 Windows/Linux；ADR-005 + ADR-006） |
+| 桌面三层启动编排 | `src-tauri/src/app_runtime.rs`（定位 → 版本闸门 → 环境探针 → Host → 认证 → app server → 导航） |
+| Desktop Host 子进程 | `src-tauri/host/desktop-host.mjs` + `dsh-lite-core::desktop_host`（stdout 行协议、结构化 FATAL、优雅停止） |
+| `dsh-app://` 文档 scheme | `src-tauri/src/scheme.rs`（index 注入 boot、静态、模块脚本缓冲代理、shell 页） |
+| 回环 app server（流式 HTTP + WS + CORS） | `dsh-lite-core::app_server`（`authenticate_host` / `proxy` / `websocket` / `document`） |
+| preload 等价桥 | `src-tauri/src/bridge.rs` + `src-tauri/bridge/preload.js`（`window.dshDesktop` 全套、`dshDesktopBoot`、fetch/XHR 重写） |
+| 前端 dist 解析 | `dsh-lite-core::frontend_dist`（读全局安装内的 `dsh-web-frontend/dist`，不随包携带） |
+| dsh 最低版本闸门 | `dsh-lite-core::version_gate`（semver §11，`< 0.2.1-rc.2` 拒绝） |
 | 壳的菜单 | 原生 popup：`main.rs::shell_menu`，动作在 `run_menu_entry` |
 | dsh 定位 / 版本探测 | `dsh-lite-core::dsh_locate` |
-| 启动 `dsh web` / 就绪行解析 | `dsh-lite-core::launcher` |
-| 认证（终态 URL 必须脱 token） | `window::classify_page_load` + `connection::handle_page_load` |
-| 认证看门狗（首次加载失败自动重试一次） | `connection::arm_auth_watchdog` |
+| 附着到已在运行的 `dsh web`（`--url` / `--port`） | `dsh-lite-core::launcher` + `connection.rs`（保留的旧单层路径） |
+| 认证（终态 URL 必须脱 token） | 三层路径：`app_server::authenticate_host`；旧路径：`window::classify_page_load` |
+| 认证看门狗（首次加载失败自动重试一次） | `connection::arm_auth_watchdog`（仅旧路径） |
 | 停止子进程、不留孤儿 | `dsh-lite-core::job`（Windows Job Object / Unix 进程组） |
 | 检查 dsh 更新（`npm view`，只报告不安装） | `dsh-lite-core::update` + `main.rs::check_update` |
 | 托盘 / 应用菜单 | `src-tauri/src/{tray,menu,menubar}.rs` |

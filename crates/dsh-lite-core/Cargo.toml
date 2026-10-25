@@ -12,6 +12,13 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 serde_json = "1"
+tokio = { version = "1.54.1", features = ["net", "rt", "rt-multi-thread", "time", "io-util", "macros", "sync", "fs"] }
+hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+futures-util = { version = "0.3.34", features = ["sink"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WKWebView dsh-app scheme spike</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: #14161a; color: #d7dae0; margin: 0; padding: 12px 16px; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: #8ec07c; }
+  #status { color: #83a598; margin-bottom: 6px; white-space: pre-wrap; }
+  #log { max-height: 62vh; overflow: auto; border: 1px solid #2b2f36; padding: 8px; background: #0f1114; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 0; }
+</style>
+</head>
+<body>
+<h1>WKWebView custom-scheme spike &middot; dsh-app://app/</h1>
+<div id="status">booting&hellip;</div>
+<pre id="log"></pre>
+<script>
+"use strict";
+(function () {
+  var PORT = __PORT__;
+  var MODE = "__MODE__";
+  var BASE = "http://127.0.0.1:" + PORT;
+  var APP = "dsh-app://app";
+  var HOSTPORT = "127.0.0.1:" + PORT;
+  var T0 = performance.now();
+
+  function nowMs() { return Math.round((performance.now() - T0) * 10) / 10; }
+  function errText(e) {
+    try {
+      if (e === null || e === undefined) return String(e);
+      var name = e.name ? String(e.name) : "";
+      var msg = e.message !== undefined ? String(e.message) : String(e);
+      return (name ? name + ": " : "") + msg;
+    } catch (_) { return "unprintable-error"; }
+  }
+  function safe(fn) { try { return { ok: true, value: fn() }; } catch (e) { return { ok: false, error: errText(e) }; } }
+  function val(fn) { var r = safe(fn); return r.ok ? r.value : "ERROR(" + r.error + ")"; }
+  function withTimeout(p, ms, label) {
+    return Promise.race([p, new Promise(function (_, rej) {
+      setTimeout(function () { rej(new Error("timeout " + label + " after " + ms + "ms")); }, ms);
+    })]);
+  }
+  function hex(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return s;
+  }
+  // FNV-1a 32-bit + additive checksum, mirrored byte-for-byte by the Rust side.
+  function digestInfo(bytes) {
+    var sum = 0, mix = 2166136261;
+    for (var i = 0; i < bytes.length; i++) {
+      sum = (sum + bytes[i]) >>> 0;
+      mix = Math.imul(mix ^ bytes[i], 16777619) >>> 0;
+    }
+    var head = bytes.slice(0, Math.min(32, bytes.length));
+    var tail = bytes.slice(Math.max(0, bytes.length - 32));
+    return { len: bytes.length, head_hex: hex(head), tail_hex: hex(tail), sum: sum, mix: mix };
+  }
+  function randomHexString(chars) {
+    var n = Math.floor(chars / 2);
+    var bytes = new Uint8Array(n);
+    var filled = false;
+    try {
+      if (window.crypto && typeof crypto.getRandomValues === "function") {
+        for (var o = 0; o < n; o += 65536) crypto.getRandomValues(bytes.subarray(o, Math.min(o + 65536, n)));
+        filled = true;
+      }
+    } catch (e) { filled = false; }
+    if (!filled) for (var i = 0; i < n; i++) bytes[i] = (Math.random() * 256) | 0;
+    return { text: hex(bytes), source: filled ? "crypto.getRandomValues" : "Math.random" };
+  }
+  function b64url(str) {
+    var bytes = new TextEncoder().encode(str);
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  var R = {
+    mode: MODE,
+    ua: navigator.userAgent,
+    appUrl: APP,
+    started_wall_ms: Date.now(),
+    steps: {},
+    trace: [],
+    uncaught: []
+  };
+  window.addEventListener("error", function (ev) {
+    R.uncaught.push({ t_ms: nowMs(), message: "window.onerror: " + (ev.message || "") + " @" + (ev.filename || "") + ":" + (ev.lineno || 0) });
+  });
+  window.addEventListener("unhandledrejection", function (ev) {
+    R.uncaught.push({ t_ms: nowMs(), message: "unhandledrejection: " + errText(ev.reason) });
+  });
+
+  var LOG = [];
+  function log(line) {
+    LOG.push(nowMs() + "ms  " + line);
+    R.trace.push({ t_ms: nowMs(), line: line });
+    var el = document.getElementById("log");
+    if (el) { el.textContent = LOG.join("\n"); el.scrollTop = el.scrollHeight; }
+    var st = document.getElementById("status");
+    if (st) st.textContent = line;
+  }
+  async function step(name, fn) {
+    var start = nowMs();
+    log("> " + name);
+    var rec = { t_start_ms: start };
+    try { rec.value = await fn(); rec.ok = true; }
+    catch (e) { rec.ok = false; rec.error = errText(e); }
+    rec.t_end_ms = nowMs();
+    rec.duration_ms = Math.round((rec.t_end_ms - start) * 10) / 10;
+    R.steps[name] = rec;
+    log((rec.ok ? "ok " : "FAIL ") + name + " (" + rec.duration_ms + "ms)" + (rec.ok ? "" : "  " + rec.error));
+    return rec;
+  }
+
+  var BODY = null;
+  var BODY_INFO = null;
+
+  // ---------------------------------------------------------------- factories
+
+  function envProbe() {
+    return {
+      location_href: location.href,
+      location_protocol: location.protocol,
+      location_host: location.host,
+      location_origin: location.origin,
+      location_href_length: location.href.length,
+      document_baseURI: document.baseURI,
+      rel_dot_x: val(function () { return new URL("./x", document.baseURI).href; }),
+      rel_abs_assets: val(function () { return new URL("/assets/app.js", document.baseURI).href; }),
+      rel_parent_z: val(function () { return new URL("../z", document.baseURI).href; }),
+      isSecureContext: window.isSecureContext,
+      crossOriginIsolated: window.crossOriginIsolated,
+      isSecureContext_typeof: typeof window.isSecureContext,
+      typeof_crypto: typeof crypto,
+      typeof_crypto_randomUUID: typeof (window.crypto && crypto.randomUUID),
+      typeof_crypto_subtle: typeof (window.crypto && crypto.subtle),
+      typeof_crypto_getRandomValues: typeof (window.crypto && crypto.getRandomValues),
+      typeof_navigator_mediaDevices: typeof navigator.mediaDevices,
+      typeof_mediaDevices_getUserMedia: typeof (navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+      typeof_mediaDevices_enumerateDevices: typeof (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices),
+      typeof_navigator_clipboard: typeof navigator.clipboard,
+      typeof_clipboard_writeText: typeof (navigator.clipboard && navigator.clipboard.writeText),
+      typeof_navigator_serviceWorker: typeof navigator.serviceWorker,
+      typeof_navigator_sendBeacon: typeof navigator.sendBeacon,
+      typeof_navigator_permissions: typeof navigator.permissions,
+      cookie_read: val(function () { return document.cookie; }),
+      cookie_length: val(function () { return String(document.cookie).length; }),
+      permissions_microphone: null // filled below
+    };
+  }
+
+  async function permissionsProbe() {
+    try {
+      if (!navigator.permissions || typeof navigator.permissions.query !== "function") return "no navigator.permissions.query";
+      var st = await navigator.permissions.query({ name: "microphone" });
+      return "state=" + st.state;
+    } catch (e) { return "error: " + errText(e); }
+  }
+
+  function readStream(resp, label, budgetMs) {
+    return withTimeout((async function () {
+      var reader = resp.body.getReader();
+      var dec = new TextDecoder();
+      var arrivals = [];
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        arrivals.push({ t_ms: nowMs(), text: dec.decode(chunk.value, { stream: true }) });
+      }
+      var span = arrivals.length > 1 ? Math.round((arrivals[arrivals.length - 1].t_ms - arrivals[0].t_ms) * 10) / 10 : 0;
+      return { arrivals: arrivals, arrival_count: arrivals.length, span_ms: span };
+    })(), budgetMs, label);
+  }
+
+  function eventSourceProbe(url, label, expect, budgetMs) {
+    return new Promise(function (resolve) {
+      var t = nowMs();
+      var arrivals = [];
+      var done = false;
+      var es = null;
+      function finish(extra) {
+        if (done) return;
+        done = true;
+        try { if (es) es.close(); } catch (_) {}
+        var span = arrivals.length > 1 ? Math.round((arrivals[arrivals.length - 1].t_ms - arrivals[0].t_ms) * 10) / 10 : 0;
+        resolve(Object.assign({ url: url, arrivals: arrivals, arrival_count: arrivals.length, span_ms: span, readyStateAtEnd: es ? es.readyState : null }, extra || {}));
+      }
+      try { es = new EventSource(url); }
+      catch (e) { resolve({ url: url, ctor_error: errText(e) }); return; }
+      es.onopen = function () { arrivals.push({ t_ms: nowMs() - t, event: "open" }); };
+      es.onmessage = function (ev) {
+        arrivals.push({ t_ms: nowMs() - t, data: ev.data });
+        if (arrivals.length >= expect) finish({ closed_after: expect });
+      };
+      es.onerror = function () {
+        finish({ es_error: "EventSource onerror (readyState during error = " + (es ? es.readyState : -1) + ")" });
+      };
+      setTimeout(function () { finish({ timeout: true }); }, budgetMs);
+    });
+  }
+
+  // -------------------------------------------------------------------- main
+
+  async function main() {
+    await step("env", async function () {
+      var e = envProbe();
+      e.permissions_microphone = await permissionsProbe();
+      return e;
+    });
+
+    // Q2a: POST body integrity over loopback http (fetch + XHR).
+    await step("post_fetch_http", async function () {
+      if (!BODY) {
+        var gen = randomHexString(16384);
+        BODY = gen.text;
+        BODY_INFO = { chars: BODY.length, random_source: gen.source };
+      }
+      var local = digestInfo(new TextEncoder().encode(BODY));
+      var resp = await withTimeout(fetch(BASE + "/post", { method: "POST", body: BODY }), 15000, "post_fetch_http");
+      var text = await resp.text();
+      var json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      var dg = json ? (json.digest || json) : null;
+      var match = dg ? {
+        len: dg.len === local.len,
+        head_hex: dg.head_hex === local.head_hex,
+        tail_hex: dg.tail_hex === local.tail_hex,
+        sum: dg.sum === local.sum,
+        mix: dg.mix === local.mix
+      } : null;
+      return {
+        body_chars: BODY.length,
+        body_bytes: local.len,
+        local: local,
+        status: resp.status,
+        type: resp.type,
+        content_type: resp.headers.get("content-type"),
+        server_json: json,
+        server_text_prefix: text.slice(0, 400),
+        match: match,
+        all_match: !!(match && match.len && match.head_hex && match.tail_hex && match.sum && match.mix)
+      };
+    });
+
+    await step("post_xhr_http", async function () {
+      var local = digestInfo(new TextEncoder().encode(BODY));
+      return await new Promise(function (resolve) {
+        var xhr = new XMLHttpRequest();
+        var out = { body_bytes: local.len, local: local };
+        var settled = false;
+        function done(extra) { if (settled) return; settled = true; resolve(Object.assign(out, extra)); }
+        xhr.open("POST", BASE + "/post");
+        xhr.timeout = 15000;
+        xhr.onload = function () {
+          var json = null;
+          try { json = JSON.parse(xhr.responseText); } catch (_) {}
+          var dg = json ? (json.digest || json) : null;
+          var match = dg ? {
+            len: dg.len === local.len,
+            head_hex: dg.head_hex === local.head_hex,
+            tail_hex: dg.tail_hex === local.tail_hex,
+            sum: dg.sum === local.sum,
+            mix: dg.mix === local.mix
+          } : null;
+          done({ status: xhr.status, server_json: json, match: match,
+                 all_match: !!(match && match.len && match.head_hex && match.tail_hex && match.sum && match.mix) });
+        };
+        xhr.onerror = function () { done({ xhr_error: "xhr.onerror, status=" + xhr.status + ", readyState=" + xhr.readyState }); };
+        xhr.ontimeout = function () { done({ xhr_error: "xhr timeout after 15000ms" }); };
+        xhr.send(BODY);
+      });
+    });
+
+    // Q2b: POST body through the custom scheme handler (page -> Rust -> dsh-app://).
+    await step("post_body_scheme_handler", async function () {
+      var local = digestInfo(new TextEncoder().encode(BODY));
+      var resp = await withTimeout(fetch(APP + "/__echo-body", { method: "POST", body: BODY }), 15000, "post_body_scheme");
+      var text = await resp.text();
+      var json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      var dg = json ? (json.digest || json) : null;
+      var match = dg ? {
+        len: dg.len === local.len,
+        head_hex: dg.head_hex === local.head_hex,
+        tail_hex: dg.tail_hex === local.tail_hex,
+        sum: dg.sum === local.sum,
+        mix: dg.mix === local.mix
+      } : null;
+      return { body_bytes: local.len, local: local, status: resp.status, type: resp.type,
+               server_json: json, server_text_prefix: text.slice(0, 400), match: match,
+               all_match: !!(match && match.len && match.head_hex && match.tail_hex && match.sum && match.mix) };
+    });
+
+    // Q3a: SSE over loopback http (streaming baseline).
+    await step("sse_http_fetch_stream", async function () {
+      var t = nowMs();
+      var resp = await withTimeout(fetch(BASE + "/sse", { cache: "no-store" }), 15000, "sse_http");
+      var header_ms = Math.round((nowMs() - t) * 10) / 10;
+      var out = { status: resp.status, type: resp.type,
+                  content_type: resp.headers.get("content-type"),
+                  transfer_encoding: resp.headers.get("transfer-encoding"),
+                  header_ms: header_ms, body_null: resp.body === null };
+      if (!resp.body) return out;
+      var streams = await readStream(resp, "sse_http_body", 20000);
+      return Object.assign(out, streams);
+    });
+
+    await step("sse_http_eventsource", function () {
+      return eventSourceProbe(BASE + "/sse", "sse_http_es", 3, 12000);
+    });
+
+    // Q3b: SSE produced by the Tauri custom scheme handler.
+    await step("sse_scheme_fetch_stream", async function () {
+      var t = nowMs();
+      var resp = await withTimeout(fetch(APP + "/scheme-sse", { cache: "no-store" }), 25000, "sse_scheme");
+      var header_ms = Math.round((nowMs() - t) * 10) / 10;
+      var out = { status: resp.status, type: resp.type,
+                  content_type: resp.headers.get("content-type"),
+                  transfer_encoding: resp.headers.get("transfer-encoding"),
+                  header_ms: header_ms, body_null: resp.body === null };
+      if (!resp.body) return out;
+      var streams = await readStream(resp, "sse_scheme_body", 25000);
+      return Object.assign(out, streams);
+    });
+
+    await step("sse_scheme_eventsource", function () {
+      return eventSourceProbe(APP + "/scheme-sse", "sse_scheme_es", 3, 15000);
+    });
+
+    // Q4: CORS from dsh-app://app to loopback http.
+    await step("cors_no_headers", async function () {
+      try {
+        var resp = await withTimeout(fetch(BASE + "/cors/none", { mode: "cors", cache: "no-store" }), 10000, "cors_none");
+        var text = await resp.text();
+        return { reached: "fetch resolved", status: resp.status, type: resp.type, text: text.slice(0, 200) };
+      } catch (e) {
+        return { reached: "fetch threw", error: errText(e) };
+      }
+    });
+
+    await step("cors_echo_origin", async function () {
+      var first = await withTimeout(fetch(BASE + "/cors/echo", { mode: "cors", credentials: "include", cache: "no-store" }), 10000, "cors_echo_1");
+      var t1 = await first.text();
+      var second = await withTimeout(fetch(BASE + "/cors/echo", { mode: "cors", credentials: "include", cache: "no-store" }), 10000, "cors_echo_2");
+      var t2 = await second.text();
+      var j1 = null, j2 = null;
+      try { j1 = JSON.parse(t1); } catch (_) {}
+      try { j2 = JSON.parse(t2); } catch (_) {}
+      return { status_1: first.status, status_2: second.status, body_1: j1, body_2: j2,
+               raw_1: t1.slice(0, 400), raw_2: t2.slice(0, 400) };
+    });
+
+    await step("cors_echo_no_credentials", async function () {
+      var resp = await withTimeout(fetch(BASE + "/cors/echo", { mode: "cors", cache: "no-store" }), 10000, "cors_echo_nocred");
+      var text = await resp.text();
+      return { status: resp.status, type: resp.type, text: text.slice(0, 400) };
+    });
+
+    await step("cors_star", async function () {
+      var resp = await withTimeout(fetch(BASE + "/cors/star", { mode: "cors", cache: "no-store" }), 10000, "cors_star");
+      var text = await resp.text();
+      return { status: resp.status, type: resp.type, text: text.slice(0, 400) };
+    });
+
+    // Q5: WebSocket from a dsh-app:// page.
+    await step("cookie_document", async function () {
+      var setRes = safe(function () { document.cookie = "spikecookie=1; path=/"; return document.cookie; });
+      return { after_set: setRes.ok ? setRes.value : "ERROR(" + setRes.error + ")",
+               set_ok: setRes.ok, cookie_enabled: safe(function () { return navigator.cookieEnabled; }) };
+    });
+
+    await step("websocket_loopback", function () {
+      return new Promise(function (resolve) {
+        var t = nowMs();
+        var out = { url: "ws://" + HOSTPORT + "/ws" };
+        var settled = false;
+        var ws = null;
+        function done(extra) { if (settled) return; settled = true; resolve(Object.assign(out, extra)); }
+        try { ws = new WebSocket("ws://" + HOSTPORT + "/ws"); }
+        catch (e) { done({ ctor_error: errText(e) }); return; }
+        ws.onopen = function () {
+          out.open_ms = Math.round((nowMs() - t) * 10) / 10;
+          var r = safe(function () { ws.send("ping-from-page"); return "sent"; });
+          out.send_ok = r.ok ? r.value : "ERROR(" + r.error + ")";
+        };
+        ws.onmessage = function (ev) {
+          out.message = String(ev.data);
+          out.message_ms = Math.round((nowMs() - t) * 10) / 10;
+          done({});
+          try { ws.close(); } catch (_) {}
+        };
+        ws.onerror = function () {
+          done({ open_ms: out.open_ms, ws_error: "WebSocket onerror (readyState=" + (ws ? ws.readyState : -1) + ")", no_message: out.message === undefined });
+        };
+        ws.onclose = function (ev) {
+          done({ open_ms: out.open_ms, message: out.message, close: { code: ev.code, reason: ev.reason, wasClean: ev.wasClean } });
+        };
+        setTimeout(function () { done({ timeout: true, open_ms: out.open_ms, readyState: ws ? ws.readyState : -1 }); }, 12000);
+      });
+    });
+
+    // ------------------------------------------------------------ reporting
+    var postResult = await step("report_post_loopback", async function () {
+      var payload = JSON.stringify(R);
+      try {
+        var resp = await withTimeout(fetch(BASE + "/report", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: payload
+        }), 10000, "report_post");
+        var text = await resp.text();
+        return { reached: true, status: resp.status, type: resp.type, response_prefix: text.slice(0, 200), payload_bytes: payload.length };
+      } catch (e) {
+        return { reached: false, error: errText(e), payload_bytes: payload.length };
+      }
+    });
+    log("report via http POST: " + (postResult.value && postResult.value.reached ? "reached" : "blocked") +
+        " " + JSON.stringify(postResult.value && (postResult.value.error || postResult.value.status)));
+
+    // Always also push the whole report through the dsh-app:// scheme handler,
+    // which is same-origin with this page and therefore not subject to CORS.
+    await step("report_beacon_scheme", async function () {
+      var b64 = b64url(JSON.stringify(R));
+      var CH = 1500;
+      var total = Math.max(1, Math.ceil(b64.length / CH));
+      var out = { b64_len: b64.length, total_chunks: total, chunks: [] };
+      for (var i = 0; i < total; i++) {
+        var part = b64.slice(i * CH, (i + 1) * CH);
+        try {
+          var r = await withTimeout(fetch(APP + "/__report/" + i + "/" + total + "/" + part, { cache: "no-store" }), 8000, "beacon_" + i);
+          var txt = await r.text();
+          out.chunks.push({ i: i, status: r.status, text: txt.slice(0, 120) });
+        } catch (e) {
+          out.failed_at = i;
+          out.error = errText(e);
+          break;
+        }
+      }
+      return out;
+    });
+
+    // Last-resort channel: put the payload in the fragment, the Rust side polls the URL.
+    var hashRes = safe(function () { location.hash = "#r=" + b64url(JSON.stringify(R)); return location.href.length; });
+    R.hash_fallback = hashRes.ok ? { ok: true, url_len: hashRes.value } : { ok: false, error: hashRes.error };
+
+    R.done = true;
+    var st = document.getElementById("status");
+    if (st) st.textContent = "DONE (" + MODE + ") - report sent";
+    log("DONE");
+  }
+
+  main().catch(async function (e) {
+    R.fatal = errText(e);
+    R.done = true;
+    try { await fetch(APP + "/__report/0/1/" + b64url(JSON.stringify(R))); } catch (_) {}
+    safe(function () { location.hash = "#r=" + b64url(JSON.stringify(R)); });
+  });
+})();
+</script>
+</body>
+</html>

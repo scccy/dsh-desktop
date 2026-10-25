@@ -8,13 +8,15 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_runtime;
+mod bridge;
 mod connection;
 mod lifecycle;
 mod platform;
+mod scheme;
 mod shell_server;
 mod shortcuts;
 mod state;
-mod text;
 mod window;
 
 use std::path::Path;
@@ -34,7 +36,7 @@ use dsh_lite_core::logging::Logger;
 
 use crate::connection::ErrorKind;
 use crate::lifecycle::effective_close_action;
-use crate::state::{AppState, WINDOW_STATE_FILE};
+use crate::state::{AppState, Status, WINDOW_STATE_FILE};
 use crate::window::{CONTENT_WEBVIEW, HEADER_WEBVIEW, MAIN_WINDOW, MonitorRect};
 
 /// Exit code used when the configuration cannot be read.
@@ -120,7 +122,7 @@ fn run(options: RunOptions) {
     logger.info(&format!("log directory: {}", log_dir.display()));
 
     let state = Arc::new(AppState::new(
-        data_dir,
+        data_dir.clone(),
         config_path,
         Arc::clone(&logger),
         config,
@@ -128,12 +130,13 @@ fn run(options: RunOptions) {
         created,
     ));
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
             |app, arguments, _cwd| on_second_instance(app, &arguments),
         ))
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&state))
+        .manage(bridge::BridgeState::new(data_dir))
         .on_menu_event(|app, event| run_menu_entry(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
             shell_info,
@@ -151,8 +154,51 @@ fn run(options: RunOptions) {
             shell_check_update,
             shell_about,
             open_settings,
-            quit_shell
-        ])
+            quit_shell,
+            bridge::desktop_boot,
+            bridge::desktop_console,
+            bridge::desktop_boot_failed,
+            bridge::desktop_device_info,
+            bridge::desktop_directory_pick,
+            bridge::desktop_shortcuts_get,
+            bridge::desktop_shortcuts_edit,
+            bridge::desktop_shortcuts_recording,
+            bridge::desktop_shortcuts_close_window,
+            bridge::desktop_updates_status,
+            bridge::desktop_updates_open,
+            bridge::desktop_locale_bootstrap,
+            bridge::desktop_locale_changed,
+            bridge::desktop_onboarding_api_key,
+            bridge::desktop_onboarding_active,
+            bridge::desktop_platform,
+            bridge::desktop_app_base,
+            bridge::desktop_native_theme_set,
+            bridge::desktop_platform_open,
+            bridge::desktop_platform_bounds,
+            bridge::desktop_platform_close,
+            bridge::desktop_browser_acquire,
+            bridge::desktop_browser_release
+        ]);
+
+    // The `dsh-app://` documents must be registered before the builder becomes
+    // an application; the provider reads the running state on every request.
+    let builder = scheme::install(
+        builder,
+        std::sync::Arc::new(|app: &AppHandle| {
+            let state = app.try_state::<Arc<AppState>>()?;
+            let runtime = state.runtime();
+            let app_runtime = runtime.app.as_ref()?;
+            Some(scheme::SchemeTarget {
+                dist_dir: app_runtime.dist_dir.clone(),
+                host: Some(scheme::HostTarget {
+                    origin: app_runtime.host_origin.clone(),
+                    cookie: app_runtime.cookie.clone(),
+                }),
+            })
+        }),
+    );
+
+    let app = builder
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -175,14 +221,90 @@ fn run(options: RunOptions) {
             install_shell_chrome(&handle, &state, &window)?;
             attach_window_events(&handle, &window);
             lifecycle::remember_layout(&handle, &window);
-            let plan = connection::resolve_plan(&state.config(), &state.cli);
-            connection::start(handle.clone(), Arc::clone(&state), plan);
+            start_connection(handle.clone(), Arc::clone(&state));
+            #[cfg(debug_assertions)]
+            install_debug_eval(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("the shell window configuration is invalid");
 
     app.run(move |app, event| platform::handle_run_event(app, &event));
+}
+
+/// Chooses the connection path for this launch.
+///
+/// The default launch boots the three-layer desktop stack in
+/// [`app_runtime::start`]; an explicit attach URL or port keeps the legacy
+/// single-layer path in `connection.rs` (the shell loads a running `dsh`).
+fn start_connection(handle: AppHandle, state: Arc<AppState>) {
+    let config = state.config();
+    let attach = state.cli.url.is_some()
+        || state.cli.port.is_some()
+        || config.connect.mode != ConnectMode::Spawn;
+    if attach {
+        let plan = connection::resolve_plan(&config, &state.cli);
+        connection::start(handle, state, plan);
+        return;
+    }
+
+    {
+        let mut runtime = state.runtime();
+        runtime.status = Status::Connecting;
+    }
+    thread::Builder::new()
+        .name("desktop-runtime".into())
+        .spawn(
+            move || match app_runtime::start(handle.clone(), Arc::clone(&state)) {
+                Ok(started) => state.logger.info(&format!(
+                    "three-layer desktop stack ready: app {} / host {} ({} injections)",
+                    started.app_origin,
+                    started.host_origin,
+                    started.injections.len()
+                )),
+                Err(error) => connection::fail(&handle, &state, error),
+            },
+        )
+        .ok();
+}
+
+/// Development-only: evaluates a JavaScript file inside the content webview.
+///
+/// Enabled only in debug builds and only when `DSH_DEBUG_EVAL` names a file.
+/// The script's completion value is reported through `desktop_console`, which
+/// forwards it into the shell log — the release build has no inspector, and the
+/// acceptance walk-through needs a way to read page state from a script.
+#[cfg(debug_assertions)]
+fn install_debug_eval(app: &AppHandle) {
+    let Some(path) = std::env::var_os("DSH_DEBUG_EVAL").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let handle = app.clone();
+    thread::Builder::new()
+        .name("debug-eval".into())
+        .spawn(move || {
+            let mut previous: Option<String> = None;
+            loop {
+                if let Ok(source) = std::fs::read_to_string(&path)
+                    && previous.as_deref() != Some(source.as_str())
+                {
+                    previous = Some(source.clone());
+                    if let Some(content) = handle.get_webview(CONTENT_WEBVIEW) {
+                        let script = format!(
+                            "try {{ const __v = (function () {{ {} }})(); \
+                             window.__TAURI_INTERNALS__.invoke('desktop_console', \
+                             {{ level: 'warn', message: '[eval] ' + JSON.stringify(__v) }}) }} \
+                             catch (e) {{ window.__TAURI_INTERNALS__.invoke('desktop_console', \
+                             {{ level: 'error', message: '[eval] ' + String(e) }}) }}",
+                            source
+                        );
+                        let _ = content.eval(&script);
+                    }
+                }
+                thread::sleep(Duration::from_millis(400));
+            }
+        })
+        .ok();
 }
 
 /// Opens the rolling log, falling back to the temporary directory.
@@ -220,20 +342,29 @@ fn open_logger(dir: &Path, config: &Config, options: &RunOptions) -> Logger {
 fn build_window(
     app: &AppHandle,
     state: &Arc<AppState>,
-    shell_origin: &Url,
+    _shell_origin: &Url,
 ) -> tauri::Result<tauri::Window> {
     let config = state.config();
     let width = 1200.0;
     let height = 800.0;
     let custom_title_bar = window::uses_custom_title_bar();
 
-    let window = tauri::window::WindowBuilder::new(app, MAIN_WINDOW)
-        .title(dsh_lite_core::PRODUCT_NAME)
-        .inner_size(width, height)
-        .min_inner_size(window::MIN_WIDTH as f64, window::MIN_HEIGHT as f64)
-        .decorations(!custom_title_bar)
-        .visible(true)
-        .build()?;
+    let window = {
+        let builder = tauri::window::WindowBuilder::new(app, MAIN_WINDOW)
+            .title(dsh_lite_core::PRODUCT_NAME)
+            .inner_size(width, height)
+            .min_inner_size(window::MIN_WIDTH as f64, window::MIN_HEIGHT as f64)
+            .decorations(!custom_title_bar)
+            .visible(true);
+        // macOS reads as two panes: the traffic lights sit on the sidebar and
+        // the content carries no separate title bar (G3 in desktop-parity.md).
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .transparent(true);
+        builder.build()?
+    };
 
     if custom_title_bar {
         window.add_child(
@@ -255,11 +386,13 @@ fn build_window(
     let navigation_state = Arc::clone(state);
     let load_handle = app.clone();
     let log_state = Arc::clone(state);
-    let loading_url = shell_origin
-        .join("loading.html")
-        .expect("the shell loading page URL is valid");
+    // The window starts on a shell-owned document served through the
+    // `dsh-app://` scheme handler, so it never needs the Host to be up.
+    let loading_url =
+        Url::parse("dsh-app://shell/loading.html").expect("the shell loading page URL is valid");
     let content_builder =
         tauri::webview::WebviewBuilder::new(CONTENT_WEBVIEW, WebviewUrl::External(loading_url))
+            .initialization_script(bridge::bridge_script(Some(bridge::APP_SCHEME_ORIGIN)))
             .on_navigation(move |url| handle_navigation(&navigation_state, url))
             .on_page_load(move |_webview, payload| {
                 log_state.logger.debug(&format!(
@@ -282,7 +415,14 @@ fn build_window(
                             ));
                         }
                     }
-                    connection::handle_page_load(&load_handle, payload.url());
+                    // The token handshake only exists on the legacy attach /
+                    // web-profile path; the desktop stack authenticates in
+                    // `app_runtime` before the document is shown.
+                    if payload.url().scheme() == "dsh-app" {
+                        bridge::notify_workspace_entered(&load_handle);
+                    } else if matches!(payload.url().scheme(), "http" | "https") {
+                        connection::handle_page_load(&load_handle, payload.url());
+                    }
                 }
             })
             .initialization_script(CONTEXT_MENU_SCRIPT);
@@ -422,6 +562,9 @@ fn install_shell_chrome(
 fn attach_window_events(app: &AppHandle, window: &tauri::Window) {
     let handle = app.clone();
     let window_clone = window.clone();
+    let fullscreen_mirror = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        window.is_fullscreen().unwrap_or(false),
+    ));
     window.on_window_event(move |event| {
         let Some(state) = handle.try_state::<Arc<AppState>>() else {
             return;
@@ -441,6 +584,13 @@ fn attach_window_events(app: &AppHandle, window: &tauri::Window) {
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 layout_webviews(&window_clone);
                 lifecycle::remember_layout(&handle, &window_clone);
+                // macOS keeps the traffic lights over the page; the Web UI
+                // drops their clearance while fullscreen.
+                let fullscreen = window_clone.is_fullscreen().unwrap_or(false);
+                if fullscreen != fullscreen_mirror.load(std::sync::atomic::Ordering::Relaxed) {
+                    fullscreen_mirror.store(fullscreen, std::sync::atomic::Ordering::Relaxed);
+                    bridge::notify_fullscreen(&handle, fullscreen);
+                }
             }
             tauri::WindowEvent::Moved(_) => {
                 lifecycle::remember_layout(&handle, &window_clone);
@@ -744,12 +894,12 @@ fn run_menu_entry(app: &AppHandle, id: &str) {
             }
         }
         MENU_LOGS => {
-            if let Some(state) = app.try_state::<Arc<AppState>>() {
-                if let Err(error) = window::open_path(&state.log_dir) {
-                    state
-                        .logger
-                        .warn(&format!("could not open the log directory: {error}"));
-                }
+            if let Some(state) = app.try_state::<Arc<AppState>>()
+                && let Err(error) = window::open_path(&state.log_dir)
+            {
+                state
+                    .logger
+                    .warn(&format!("could not open the log directory: {error}"));
             }
         }
         MENU_UPDATE => check_update(app),

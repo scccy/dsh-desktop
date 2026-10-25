@@ -177,7 +177,8 @@ mac 落地时的阻塞项：
 
 ### 6.4 窗口装饰与观感
 
-- 标题栏由壳自己画：`decorations: false`，顶上是 40 DIP 的 `header` webview，下面是 `content` webview。决策与被否掉的替代方案见 [architecture.md ADR-005](architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)；
+- **macOS**：`decorations: true` + `title_bar_style(Overlay)` + `hidden_title(true)` + 透明窗口，红绿灯直接叠在页面上，窗口读作「侧栏 + 内容」两块头部；
+- **Windows / Linux**：标题栏由壳自己画（`decorations: false`，顶上 40 DIP 的 `header` webview，下面是 `content` webview）。历史与被否掉的替代方案见 [ADR-005](architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)，origin 拆分见 [ADR-006](architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)；
 - 底色是取样自页面的纯色（浅 `#f9fafb` / 深 `#17181b`），与内容区无缝衔接；**没有 Mica**，因为 WebView2 里拿不到系统 Mica 材质，用同色近似。切深色主题或 `dsh` 改版时这两个值要复核；
 - 拖动只绑在菜单右侧的空白条（`.drag`），400 ms 内的第二次按下判为双击 → 最大化；三个窗口按钮走 `shell_window_action`，关闭仍走 `CloseRequested`，所以 `window.closeAction` 的 hide / quit 语义不变；
 - 无边框窗口的阴影由 Tauri 默认的 DWM 阴影提供，圆角交给系统；本项目不额外调用 DWM API；
@@ -192,8 +193,22 @@ mac 落地时的阻塞项：
 - **视图**：刷新页面（`Ctrl+R`）/ 关于 dsh desktop；
 - 「重试连接」重跑整条启动链（停掉 `dsh` 再起，`connection::restart`），「刷新页面」只让 `content` webview 重新加载当前 URL（`Webview::reload`）——两者不可混淆；
 - 菜单是**原生 popup**（`Menu::popup_at`），不是 HTML 下拉：`header` webview 只有 40 DIP 高，HTML 下拉一出边界就被 webview 矩形裁掉；
-- **快捷键只在壳自己的页面里生效**（加载 / 错误 / 设置）：Tauri 不向远程页面注入 IPC，`http://127.0.0.1:<port>` 上的 `dsh` 页面拿不到 `__TAURI_INTERNALS__`，`shortcuts.rs` 的监听脚本会直接返回。这是有意的安全边界（壳不把命令面暴露给被承载的页面），代价是菜单里显示的 `Ctrl+Shift+L` / `Ctrl+Q` 在 `dsh` 页面内按不出效果——同样两件事要点菜单。`Ctrl+R` 例外：WebView2 自己会重载页面，与「刷新页面」等效；
+- **DESKTOP 桥只注入应用文档**：`bridge/preload.js` 通过 `initialization_script` 注入到 `content` webview，但每个命令都会校验调用方必须是 `dsh-app://app` 主 frame；旧的 `dsh web` 附着路径（`--url` / `--port`）不注入桥，`shortcuts.rs` 的监听脚本在非壳页面上直接返回。`Ctrl+R` 由 WebView 自己重载页面，与「刷新页面」等效；
 - macOS 不受影响：应用菜单的 Edit 子菜单走 AppKit responder chain，是真正的原生编辑。
+
+### 6.6 真机调试（页面内取数）
+
+release 构建没有 inspector。调试构建提供一条显式开关：把一段 JS 写进文件，壳会把它投进 `content` webview 执行并把返回值写进滚动日志：
+
+```sh
+DSH_DEBUG_EVAL=/tmp/dsh-eval.js ./target/debug/dsh-desktop
+# /tmp/dsh-eval.js 里写函数体，必须 return 一个可 JSON 序列化的值
+# 日志里出现：DEBUG page warn: [eval] {...}
+```
+
+它只在 `debug_assertions` 下编译，且必须显式设置 `DSH_DEBUG_EVAL` 才会启动监听线程；release 包没有这条路径。验收时用它读取 `data-platform`、`dshDesktop.protocolVersion`、`__DSH_TRANSPORT__` 等页面状态。
+
+真机验收建议使用隔离的 `DSH_HOME`（例如 `DSH_HOME=/tmp/dsh-desktop-home`，把 `~/.dsh/profiles/desktop` 与 `.credentials.yaml` 复制进去），这样测试产生的 session 与插件状态不会污染日常使用的 Home。
 
 ## 7. 提交前的最小检查
 

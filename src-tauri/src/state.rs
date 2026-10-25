@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use dsh_lite_core::app_server::AppServer;
 use dsh_lite_core::cli::RunOptions;
 use dsh_lite_core::config::{Config, ConnectMode, Platform};
+use dsh_lite_core::desktop_host::DesktopHost;
 use dsh_lite_core::launcher::DshChild;
 use dsh_lite_core::logging::Logger;
 use url::Url;
@@ -73,8 +75,24 @@ impl Status {
     }
 }
 
+/// The three-layer desktop runtime: Host, loopback app server and boot payload.
+///
+/// Created by [`crate::app_runtime::start`] once the Desktop Host is
+/// authenticated. The cookie stays in this struct and is only ever handed to
+/// the proxy layers; it is never logged, serialized or sent to the renderer.
+pub struct AppRuntime {
+    /// Authenticated Desktop Host origin.
+    pub host_origin: Url,
+    /// Packaged `dsh-web-frontend/dist` directory.
+    pub dist_dir: PathBuf,
+    /// Host cookie (name and value) for the proxy layers.
+    pub cookie: String,
+    /// Streaming HTTP/WS proxy that owns the port above.
+    pub server: AppServer,
+}
+
 /// Mutable values mutated by the worker and the window callbacks.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Runtime {
     /// Sponsored `dsh` process, absent in attach mode.
     pub child: Option<DshChild>,
@@ -98,6 +116,10 @@ pub struct Runtime {
     pub shell_origin: Option<Url>,
     /// Last failure, kept for the settings page.
     pub last_error: Option<ShellError>,
+    /// Desktop Host owned by the three-layer startup, once it is running.
+    pub host: Option<DesktopHost>,
+    /// App server and boot payload of the three-layer startup.
+    pub app: Option<AppRuntime>,
 }
 
 /// Everything the shell shares between threads.

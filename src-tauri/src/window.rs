@@ -189,6 +189,12 @@ pub fn classify_navigation(
     shell_origin: Option<&Url>,
     candidate: &Url,
 ) -> Navigation {
+    // The renderer document (`dsh-app://app/`) and the shell's own documents
+    // (`dsh-app://shell/…`) belong to this window; nothing else on that scheme
+    // exists.
+    if candidate.scheme() == "dsh-app" {
+        return Navigation::App;
+    }
     if is_shell_page(shell_origin, candidate) {
         return Navigation::Shell;
     }

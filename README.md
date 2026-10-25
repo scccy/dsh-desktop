@@ -1,6 +1,6 @@
 # DSH Desktop
 
-面向技术用户的轻量原生桌面外壳：**不自带任何运行时**，只负责启动并承载本机已有的 `dsh web`，并把宿主机真实的系统环境交给它。
+面向技术用户的轻量原生桌面外壳：**不自带任何运行时**，负责启动本机已有的 `dsh`（Desktop Host + desktop profile），并把宿主机真实的系统环境交给它。
 
 - 产品名：`DSH Desktop` · 可执行文件 `dsh-desktop` · 包标识 `dev.dsh.desktop`
 - 语言 / 框架：Rust + **Tauri v2**，系统 WebView（WebView2 / WKWebView / WebKitGTK），无 Chromium、无 Node 构建链
@@ -9,22 +9,25 @@
 
 ## 状态（如实）
 
-**单一 Tauri 壳，三平台一套代码；Windows 本机已端到端跑通（自绘标题栏、原生菜单、单实例、Job Object、认证）。尚未发布，也还没有实测过的安装包。**
+**单一 Tauri 壳，三平台一套代码。三层桌面链路（Desktop Host + 回环流式代理 + preload 等价桥）已在 macOS 真机端到端跑通：`dsh-app://app/` 文档、13 条 injections、WS 代理、对话流式回复。Windows 旧两层壳跑通过，Linux 未真机验收；尚未发布。**
 
 | 部分 | 状态 |
 |---|---|
 | Cargo workspace（`crates/dsh-lite-core` + `src-tauri`） | 已建立 |
 | `dsh-lite-core`：配置、CLI、定位、环境探针、启动、URL 策略、日志、更新判定、进程回收 | 已实现并由 `cargo test` 覆盖 |
-| `src-tauri` 窗口壳：单窗口双 webview、单实例、连接/生命周期、托盘、菜单、快捷键 | 已实现，Windows 本机跑通 |
+| `src-tauri` 窗口壳：单实例、连接/生命周期、托盘、菜单、快捷键 | 已实现 |
+| 三层桌面链路：`app_runtime` + `desktop_host` + `scheme` + `app_server` + `bridge` | 已实现并 macOS 真机验收（见 [desktop-parity §7.2](docs/desktop-parity.md)） |
+| macOS 两块头部（hiddenInset、无独立标题栏） | 已实现；vibrancy/红绿灯位置待精调（P3） |
 | `src-tauri/src/platform/` 平台差异层 | 已建立（macOS / Linux / Windows 各一份，见 [docs/architecture.md](docs/architecture.md#11-平台差异层)） |
 | `src-ui/` 标题栏 + 加载页 / 错误页 / 设置页 | 已落地（零构建 HTML/CSS/JS） |
 | Windows 安装包（Tauri bundler / NSIS） | 配置就位，未实测 |
 | 图标（`assets/`、`src-tauri/icons/`、`src-ui/icon.png`） | 已换成正式设计稿（`assets/icon.png` 为 1024 透明圆角源，`scripts/render-icons.ps1` 派生各平台尺寸） |
 | 三平台 CI（fmt / clippy / test / release 构建） | 已就位 |
 | 发布流水线（tag 触发、三平台打包、SHA-256、可选签名） | 已就位（签名未接线，见 [docs/development.md](docs/development.md)） |
-| macOS / Linux 真机验收 | 未做 |
+| macOS 真机验收 | 已做（三层链路 + 流式对话，2026-10-25） |
+| Linux 真机验收 | 未做 |
 
-窗口装饰由壳自己画：`decorations: false` + 一个 40 DIP 的 `header` webview 画标题栏，下面是 `content` webview 装 `dsh web` 或三屏。为什么不能在一个 webview 里做、以及被否掉的替代方案见 [ADR-005](docs/architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
+窗口观感：macOS 用 `hiddenInset`（红绿灯叠在侧栏上、无独立标题栏，两块头部）；Windows / Linux 仍由壳自绘 40 DIP 标题栏（`header` webview）。渲染层 origin 与流量的拆分决策见 [ADR-006](docs/architecture.md#adr-006-渲染层-origin-拆分dsh-appapp-承载文档回环-app-server-承载动态流量)，标题栏历史见 [ADR-005](docs/architecture.md#adr-005-回到单一-tauri-壳用双-webview-画标题栏)。
 
 ## 前置条件
 
@@ -40,14 +43,14 @@ dsh --version
 ## 关键行为
 
 ```sh
-# 壳自己启动 dsh 并承载其 Web GUI（默认，profile = web）
+# 默认：起 Desktop Host（desktop profile）并承载完整桌面 UI
 dsh-desktop
 
-# 附着到已在运行 / 由终端启动的实例
+# 附着到已在运行 / 由终端启动的实例（旧的单层路径，仍保留）
 dsh-desktop --url "<dsh web: 行里给出的完整 URL>"
 ```
 
-- 启动 `dsh --profile web --no-open --host 127.0.0.1 --port 0`，解析 stdout 的 `dsh web: <url>` 行，用其中一次性 token URL 完成首跳；
+- 默认启动顺序：定位全局 `dsh` → 最低版本校验 → 登录 shell 环境探针 → 起 Desktop Host（`runProfile({profile:"desktop"})`）→ 用一次性 token URL 换 cookie → 起回环 app server（静态 dist + 流式 HTTP/WS 代理 + CORS）→ 窗口加载 `dsh-app://app/` → preload 桥交付 injections 与 `streamBaseUrl`；
 - macOS / Linux 先读取用户登录 shell 的环境（`<shell> -ilc 'env -0'`），Windows 直接继承注册表用户变量与系统变量；
 - 完整参数见 `dsh-desktop --help`，需求见 [项目要求.md](项目要求.md)。
 
